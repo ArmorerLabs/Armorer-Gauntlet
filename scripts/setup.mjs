@@ -39,6 +39,7 @@ async function main() {
   }
 
   run("npm", ["install"], "Installing npm dependencies");
+  run("npm", ["run", "build:libs"], "Building workspace libraries");
 
   const env = readEnvFile();
   const merged = {

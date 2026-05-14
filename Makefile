@@ -8,12 +8,15 @@ endif
 COMPOSE ?= docker compose
 RELAY_URL ?= ws://127.0.0.1:8787
 
-.PHONY: setup start up down logs daemon tunnel check
+.PHONY: setup start up down logs daemon tunnel check build-libs
+
+build-libs:
+	npm run build:libs
 
 setup:
 	node scripts/setup.mjs
 
-start:
+start: build-libs
 	$(COMPOSE) --profile tunnel up --build -d relay pwa front-door
 	$(COMPOSE) --profile tunnel up -d --force-recreate tunnel
 	node scripts/start.mjs
@@ -31,10 +34,10 @@ down:
 logs:
 	$(COMPOSE) --profile tunnel logs -f --tail=120
 
-daemon:
+daemon: build-libs
 	npm exec -w @armorer/gauntlet-daemon -- tsx src/index.ts start --relay "$(RELAY_URL)" --pair
 
-tunnel:
+tunnel: build-libs
 	$(COMPOSE) --profile tunnel up --build -d relay pwa front-door
 	$(COMPOSE) --profile tunnel up -d --force-recreate tunnel
 	node scripts/print-tunnel.mjs

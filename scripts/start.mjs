@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { waitForTunnelUrl } from "./lib/tunnel.mjs";
+
+execFileSync("npm", ["run", "build:libs"], { stdio: "inherit" });
 
 const appUrl = await waitForTunnelUrl();
 if (!appUrl) {

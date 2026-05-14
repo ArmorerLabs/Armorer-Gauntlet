@@ -56,8 +56,8 @@ make start
 
 What happens:
 
-- `make setup` installs npm dependencies, checks Docker, and generates local push keys in `.env`.
-- `make start` brings up the relay, PWA, HTTPS tunnel, and local daemon.
+- `make setup` installs npm dependencies, builds internal workspace libraries, checks Docker, and generates local push keys in `.env`.
+- `make start` refreshes internal workspace libraries, brings up the relay, PWA, HTTPS tunnel, and local daemon.
 - The daemon prints a short-lived QR. Scan it with your phone camera.
 
 Daily-driver commands:
@@ -155,7 +155,7 @@ npm run build
 npm run test:e2e
 ```
 
-`npm run test:e2e` uses a mocked relay/daemon fixture and covers mobile and desktop browser flows with Playwright.
+`npm run check` also verifies that internal workspace exports are built and importable, which catches fresh-clone package mistakes before they reach users. `npm run test:e2e` uses a mocked relay/daemon fixture and covers mobile and desktop browser flows with Playwright.
 
 ## Release Notes
 

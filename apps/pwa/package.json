@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
+    "dev": "node ../../scripts/build-libs.mjs && vite --host 0.0.0.0",
+    "build": "node ../../scripts/build-libs.mjs && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "check": "svelte-kit sync && tsc -p tsconfig.json --noEmit"
+    "check": "node ../../scripts/build-libs.mjs && svelte-kit sync && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@armorer/gauntlet-shared": "0.1.0",

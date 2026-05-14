@@ -13,13 +13,15 @@
   ],
   "scripts": {
     "setup": "node scripts/setup.mjs",
+    "build:libs": "node scripts/build-libs.mjs",
     "build": "npm run build --workspaces --if-present",
-    "check": "npm run build -w @armorer/gauntlet-codex-protocol -w @armorer/gauntlet-shared && npm run check --workspaces --if-present",
+    "verify:exports": "node scripts/verify-workspace-exports.mjs",
+    "check": "npm run build:libs && npm run verify:exports && npm run check --workspaces --if-present",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "dev:relay": "npm run dev -w @armorer/gauntlet-relay",
-    "dev:daemon": "npm run dev -w @armorer/gauntlet-daemon",
-    "dev:pwa": "npm run dev -w @armorer/gauntlet-pwa",
+    "dev:relay": "npm run build:libs && npm run dev -w @armorer/gauntlet-relay",
+    "dev:daemon": "npm run build:libs && npm run dev -w @armorer/gauntlet-daemon",
+    "dev:pwa": "npm run build:libs && npm run dev -w @armorer/gauntlet-pwa",
     "generate:codex-protocol": "codex app-server generate-ts --experimental --out packages/codex-protocol/src/generated"
   },
   "devDependencies": {

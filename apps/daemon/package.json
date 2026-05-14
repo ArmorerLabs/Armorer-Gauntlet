@@ -7,9 +7,9 @@
     "armorer-gauntlet-daemon": "./dist/index.js"
   },
   "scripts": {
-    "dev": "tsx src/index.ts start --relay ws://127.0.0.1:8787",
-    "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "dev": "node ../../scripts/build-libs.mjs && tsx src/index.ts start --relay ws://127.0.0.1:8787",
+    "build": "node ../../scripts/build-libs.mjs && tsc -p tsconfig.json",
+    "check": "node ../../scripts/build-libs.mjs && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@armorer/gauntlet-codex-protocol": "0.1.0",

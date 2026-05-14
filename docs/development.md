@@ -31,6 +31,8 @@ npm run build
 npm run test:e2e
 ```
 
+Dev, build, and check scripts rebuild the internal `packages/*` libraries first so a fresh clone does not depend on stale local `dist/` output. `npm run check` also runs a workspace export smoke check that imports internal package entrypoints.
+
 Focused workspace commands:
 
 ```bash
