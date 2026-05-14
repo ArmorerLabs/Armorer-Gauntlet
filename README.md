@@ -15,6 +15,18 @@ Local-first by default. Self-hosted relay. End-to-end encrypted app messages. No
 
 ---
 
+## Demo
+
+<p align="center">
+  <a href="docs/assets/armorer-gauntlet-demo.mp4">
+    <img src="docs/assets/armorer-gauntlet-demo.jpg" alt="Armorer Gauntlet mobile demo" width="320">
+  </a>
+</p>
+
+<p align="center">
+  <a href="docs/assets/armorer-gauntlet-demo.mp4">Watch the 27-second demo</a>
+</p>
+
 ## One Command
 
 ```bash
