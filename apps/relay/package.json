@@ -1,6 +1,6 @@
 {
   "name": "@armorer/gauntlet-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -13,7 +13,7 @@
     "check": "node ../../scripts/build-libs.mjs && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@armorer/gauntlet-shared": "0.1.0",
+    "@armorer/gauntlet-shared": "0.2.0",
     "commander": "^13.1.0",
     "web-push": "^3.6.7",
     "ws": "^8.18.2"

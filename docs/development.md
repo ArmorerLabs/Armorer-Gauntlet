@@ -64,6 +64,30 @@ npm run generate:codex-protocol
 
 The generated files live under `packages/codex-protocol/src/generated`.
 
+## Debugging the Daemon
+
+The daemon prints connection status and pairing prompts to stdout by default. When a mobile session looks stuck (no response, queue not draining, approval card missing), enable the trace mode and tee output to a file:
+
+```bash
+# Flags
+npm exec -w @armorer/gauntlet-daemon -- tsx src/index.ts start \
+  --relay ws://127.0.0.1:8787 --pair \
+  --debug --log-file /tmp/gauntlet-daemon.log
+
+# Or environment variables
+GAUNTLET_DEBUG=1 GAUNTLET_LOG_FILE=/tmp/gauntlet-daemon.log make daemon
+```
+
+With `--debug` the daemon logs:
+
+- inbound and outbound relay frames (type, kind, sequence, sender)
+- Codex `app-server` notifications and requests by method
+- turn lifecycle: start, queue, drain, interrupt, retry, resume
+
+Even without `--debug`, the daemon reports relay socket close and Codex `app-server` socket close events. A silent disconnect is the most common cause of a phone session that looks alive but never receives a reply.
+
+`--log-file` tees both stdout and stderr to the file. It is append-only, so subsequent runs grow the file rather than truncating it.
+
 ## Design Notes
 
 The PWA uses Armorer UI vibes:

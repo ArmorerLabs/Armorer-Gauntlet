@@ -5,7 +5,8 @@ import {
   type DeviceIdentity,
   type PublicKeyJwk,
   type SessionSummary,
-  type ThreadTurnSnapshot
+  type ThreadTurnSnapshot,
+  type TurnAttachmentSummary
 } from "@armorer/gauntlet-shared";
 import type { CodexEvent } from "@armorer/gauntlet-shared";
 
@@ -20,8 +21,15 @@ export interface MobilePeer {
 export interface PendingTurnState {
   requestId: string;
   text: string;
-  status: "sending" | "accepted" | "running" | "completed" | "failed";
+  status: "sending" | "queued" | "accepted" | "running" | "completed" | "failed" | "interrupted";
+  placement?: "current" | "next";
+  attachments?: TurnAttachmentSummary[];
   error?: string;
+}
+
+export interface ThreadErrorState {
+  code: string;
+  message: string;
 }
 
 export interface RemoteUiState {
@@ -34,9 +42,11 @@ export interface RemoteUiState {
   daemon?: DaemonSummary;
   sessions: SessionSummary[];
   threads: Record<string, CodexThreadSnapshot>;
+  threadErrors: Record<string, ThreadErrorState>;
   events: CodexEvent[];
   attentions: AttentionEvent[];
   pendingTurns: Record<string, PendingTurnState>;
+  lastOpenedThreadId?: string;
 }
 
 export const initialState: RemoteUiState = {
@@ -45,6 +55,7 @@ export const initialState: RemoteUiState = {
   pairing: false,
   sessions: [],
   threads: {},
+  threadErrors: {},
   events: [],
   attentions: [],
   pendingTurns: {}
@@ -70,7 +81,51 @@ export function seedSessionThread(state: RemoteUiState, session: SessionSummary)
       ...state.threads,
       [session.id]: state.threads[session.id] ?? sessionToThreadSnapshot(session)
     },
+    threadErrors: withoutKey(state.threadErrors, session.id),
     error: undefined
+  };
+}
+
+export function applySessionsSnapshot(
+  state: RemoteUiState,
+  sessions: SessionSummary[],
+  daemon: DaemonSummary
+): RemoteUiState {
+  const sessionIds = new Set(sessions.map((session) => session.id));
+  const pendingThreadIds = new Set(Object.keys(state.pendingTurns));
+  return {
+    ...state,
+    daemon,
+    sessions,
+    threads: Object.fromEntries(
+      Object.entries(state.threads).filter(([threadId]) => sessionIds.has(threadId) || pendingThreadIds.has(threadId))
+    ),
+    threadErrors: Object.fromEntries(
+      Object.entries(state.threadErrors).filter(([threadId]) => !sessionIds.has(threadId) && pendingThreadIds.has(threadId))
+    ),
+    error: undefined
+  };
+}
+
+export function setThreadError(
+  state: RemoteUiState,
+  threadId: string,
+  code: string,
+  message: string
+): RemoteUiState {
+  return {
+    ...state,
+    threadErrors: {
+      ...state.threadErrors,
+      [threadId]: { code, message }
+    }
+  };
+}
+
+export function rememberOpenedThread(state: RemoteUiState, threadId: string): RemoteUiState {
+  return {
+    ...state,
+    lastOpenedThreadId: threadId
   };
 }
 
@@ -90,61 +145,132 @@ export function sessionToThreadSnapshot(session: SessionSummary): CodexThreadSna
 export function mergeThreadSnapshot(state: RemoteUiState, snapshot: CodexThreadSnapshot): CodexThreadSnapshot {
   const pending = state.pendingTurns[snapshot.id];
   const existing = state.threads[snapshot.id];
-  if (!pending) return mergePreservedAgentTurns(snapshot, existing);
+  if (!pending) return { ...snapshot, turns: mergeTurnsPreservingTimeline(snapshot, existing) };
 
-  const snapshotTurnIds = new Set(snapshot.turns.map((turn) => turn.id));
-  const snapshotHasPendingText = hasUserText(snapshot.turns, pending.text);
-  const preservedTurns = existing
-    ? existing.turns
-        .filter((turn) => !snapshotTurnIds.has(turn.id))
-        .map((turn) => filterPreservableItems(turn, pending.text, snapshotHasPendingText))
-        .filter((turn): turn is ThreadTurnSnapshot => Boolean(turn))
-    : [];
-  const needsOptimisticTurn = !snapshotHasPendingText && !hasUserText(preservedTurns, pending.text);
+  const adjustedSnapshot = pending.placement === "next" || hasUserText(snapshot.turns, pending.text)
+    ? snapshot
+    : injectPendingUserIntoActiveTurn(snapshot, pending);
+
+  const snapshotHasPendingText = hasUserText(adjustedSnapshot.turns, pending.text);
+  const optimisticTurn = snapshotHasPendingText ? undefined : createOptimisticTurn(pending);
 
   return {
-    ...snapshot,
-    status: optimisticSnapshotStatus(snapshot.status, pending.status),
-    turns: [
-      ...snapshot.turns,
-      ...(needsOptimisticTurn ? [createOptimisticTurn(pending)] : []),
-      ...preservedTurns
-    ]
+    ...adjustedSnapshot,
+    status: optimisticSnapshotStatus(adjustedSnapshot.status, pending.status),
+    turns: mergeTurnsPreservingTimeline(adjustedSnapshot, existing, {
+      pending,
+      snapshotHasPendingText,
+      optimisticTurn
+    })
   };
 }
 
-function mergePreservedAgentTurns(
+function injectPendingUserIntoActiveTurn(
   snapshot: CodexThreadSnapshot,
-  existing: CodexThreadSnapshot | undefined
+  pending: PendingTurnState
 ): CodexThreadSnapshot {
-  if (!existing) return snapshot;
-  const snapshotTurnIds = new Set(snapshot.turns.map((turn) => turn.id));
-  const preservedTurns = existing.turns
-    .filter((turn) => !snapshotTurnIds.has(turn.id))
-    .map((turn) => ({
-      ...turn,
-      items: turn.items.filter((item) => item.type === "agentMessage")
-    }))
-    .filter((turn) => turn.items.length);
+  const lastIdx = snapshot.turns.length - 1;
+  const lastTurn = snapshot.turns[lastIdx];
+  if (!lastTurn) return snapshot;
+  if (lastTurn.status === "completed" || lastTurn.status === "failed") return snapshot;
+  if (lastTurn.items.some((item) => item.type === "userMessage" && item.text?.trim() === pending.text)) {
+    return snapshot;
+  }
+  const injectedTurn: ThreadTurnSnapshot = {
+    ...lastTurn,
+    items: [
+      {
+        id: `${pending.requestId}_user`,
+        type: "userMessage",
+        text: pending.text,
+        ...(pending.attachments?.length ? { attachments: pending.attachments } : {})
+      },
+      ...lastTurn.items
+    ]
+  };
   return {
     ...snapshot,
-    turns: [...snapshot.turns, ...preservedTurns]
+    turns: [...snapshot.turns.slice(0, lastIdx), injectedTurn]
   };
+}
+
+function mergeTurnsPreservingTimeline(
+  snapshot: CodexThreadSnapshot,
+  existing: CodexThreadSnapshot | undefined,
+  pendingMerge?: {
+    pending: PendingTurnState;
+    snapshotHasPendingText: boolean;
+    optimisticTurn?: ThreadTurnSnapshot | undefined;
+  }
+): ThreadTurnSnapshot[] {
+  if (!existing) {
+    return pendingMerge?.optimisticTurn ? [...snapshot.turns, pendingMerge.optimisticTurn] : snapshot.turns;
+  }
+
+  const usedSnapshotTurnIds = new Set<string>();
+  const snapshotTurnIds = new Set(snapshot.turns.map((turn) => turn.id));
+  const pendingSnapshotTurn = pendingMerge ? findTurnWithUserText(snapshot.turns, pendingMerge.pending.text) : undefined;
+  const turns: ThreadTurnSnapshot[] = [];
+
+  for (const existingTurn of existing.turns) {
+    const snapshotTurn = snapshot.turns.find((turn) => turn.id === existingTurn.id);
+    if (snapshotTurn) {
+      turns.push(snapshotTurn);
+      usedSnapshotTurnIds.add(snapshotTurn.id);
+      continue;
+    }
+
+    if (pendingMerge && existingTurn.id === pendingMerge.pending.requestId) {
+      if (pendingSnapshotTurn && !usedSnapshotTurnIds.has(pendingSnapshotTurn.id)) {
+        turns.push(pendingSnapshotTurn);
+        usedSnapshotTurnIds.add(pendingSnapshotTurn.id);
+      } else if (pendingMerge.optimisticTurn) {
+        turns.push(pendingMerge.optimisticTurn);
+      }
+      continue;
+    }
+
+    if (snapshotTurnIds.has(existingTurn.id)) continue;
+    const preserved = pendingMerge
+      ? filterPreservableItems(existingTurn, pendingMerge.pending.text, pendingMerge.snapshotHasPendingText)
+      : existingTurn;
+    if (preserved?.items.length) turns.push(preserved);
+  }
+
+  for (const snapshotTurn of snapshot.turns) {
+    if (!usedSnapshotTurnIds.has(snapshotTurn.id)) {
+      turns.push(snapshotTurn);
+      usedSnapshotTurnIds.add(snapshotTurn.id);
+    }
+  }
+
+  if (
+    pendingMerge?.optimisticTurn &&
+    !turns.some((turn) => turn.id === pendingMerge.optimisticTurn?.id) &&
+    !hasUserText(turns, pendingMerge.pending.text)
+  ) {
+    turns.push(pendingMerge.optimisticTurn);
+  }
+
+  return turns;
 }
 
 export function addOptimisticTurn(
   state: RemoteUiState,
   threadId: string,
   requestId: string,
-  text: string
+  text: string,
+  attachments: TurnAttachmentSummary[] = [],
+  placement: PendingTurnState["placement"] = "current"
 ): RemoteUiState {
   const thread = state.threads[threadId];
   return {
     ...state,
     pendingTurns: {
       ...state.pendingTurns,
-      [threadId]: { requestId, text, status: "sending" }
+      [threadId]: { requestId, text, status: "sending", placement, ...(attachments.length ? { attachments } : {}) }
     },
+    threadErrors: withoutKey(state.threadErrors, threadId),
     threads: thread
       ? {
           ...state.threads,
@@ -152,7 +278,7 @@ export function addOptimisticTurn(
             ...thread,
             turns: [
               ...thread.turns.filter((turn) => turn.id !== requestId),
-              createOptimisticTurn({ requestId, text, status: "sending" })
+              createOptimisticTurn({ requestId, text, status: "sending", placement, attachments })
             ]
           }
         }
@@ -189,6 +315,37 @@ export function markPendingTurnByRequest(
 ): RemoteUiState {
   const threadId = Object.entries(state.pendingTurns).find(([, pending]) => pending.requestId === requestId)?.[0];
   return threadId ? markPendingTurn(state, threadId, status, error) : state;
+}
+
+export function markThreadInterrupted(
+  state: RemoteUiState,
+  threadId: string,
+  message = "Stopped."
+): RemoteUiState {
+  const thread = state.threads[threadId];
+  const pending = state.pendingTurns[threadId];
+  return {
+    ...state,
+    pendingTurns: pending
+      ? {
+          ...state.pendingTurns,
+          [threadId]: {
+            ...pending,
+            status: "interrupted",
+            error: message
+          }
+        }
+      : state.pendingTurns,
+    threads: thread
+      ? {
+          ...state.threads,
+          [threadId]: {
+            ...thread,
+            status: "idle"
+          }
+        }
+      : state.threads
+  };
 }
 
 export function appendAgentDelta(
@@ -231,7 +388,9 @@ export function appendAgentDelta(
   };
 }
 
-function createOptimisticTurn(pending: Pick<PendingTurnState, "requestId" | "text" | "status">): ThreadTurnSnapshot {
+function createOptimisticTurn(
+  pending: Pick<PendingTurnState, "requestId" | "text" | "status" | "placement" | "attachments">
+): ThreadTurnSnapshot {
   return {
     id: pending.requestId,
     status: pending.status,
@@ -240,7 +399,8 @@ function createOptimisticTurn(pending: Pick<PendingTurnState, "requestId" | "tex
       {
         id: `${pending.requestId}_user`,
         type: "userMessage",
-        text: pending.text
+        text: pending.text,
+        ...(pending.attachments?.length ? { attachments: pending.attachments } : {})
       }
     ]
   };
@@ -252,8 +412,9 @@ function filterPreservableItems(
   snapshotHasPendingText: boolean
 ): ThreadTurnSnapshot | null {
   const items = turn.items.filter((item) => {
-    if (item.type === "agentMessage") return true;
-    return !snapshotHasPendingText && item.type === "userMessage" && item.text?.trim() === pendingText;
+    if (item.type !== "userMessage") return true;
+    if (item.text?.trim() === pendingText) return !snapshotHasPendingText;
+    return true;
   });
   return items.length ? { ...turn, items } : null;
 }
@@ -262,9 +423,13 @@ function hasUserText(turns: ThreadTurnSnapshot[], text: string): boolean {
   return turns.some((turn) => turn.items.some((item) => item.type === "userMessage" && item.text?.trim() === text));
 }
 
+function findTurnWithUserText(turns: ThreadTurnSnapshot[], text: string): ThreadTurnSnapshot | undefined {
+  return turns.find((turn) => turn.items.some((item) => item.type === "userMessage" && item.text?.trim() === text));
+}
+
 function optimisticSnapshotStatus(status: string, pendingStatus: PendingTurnState["status"]): string {
   if (pendingStatus === "running") return status.toLowerCase().includes("idle") ? "active" : status;
-  if (pendingStatus === "sending" || pendingStatus === "accepted") {
+  if (pendingStatus === "sending" || pendingStatus === "queued" || pendingStatus === "accepted") {
     return status.toLowerCase().includes("idle") ? "starting" : status;
   }
   return status;

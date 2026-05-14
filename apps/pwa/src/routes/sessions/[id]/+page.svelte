@@ -1,31 +1,57 @@
 <script lang="ts">
   import { browser } from "$app/environment";
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
   import { page } from "$app/stores";
-  import { ArrowDown, ArrowLeft, ArrowUp, RefreshCw } from "lucide-svelte";
-  import { unwrapNestedErrorMessage } from "@armorer/gauntlet-shared";
+  import { ArrowDown, ArrowLeft, ArrowUp, CircleStop, Paperclip, RefreshCw, X, Zap } from "lucide-svelte";
+  import { unwrapNestedErrorMessage, type TurnAttachment, type TurnAttachmentSummary } from "@armorer/gauntlet-shared";
+  import { fileToTurnAttachment, formatAttachmentSize } from "$lib/attachments";
   import { compactPath, displaySubtitle, displayTitle, relativeTime, statusLabel } from "$lib/display";
-  import { renderMarkdown } from "$lib/markdown";
+  import { renderMarkdown, renderPlainTextWithDirectives } from "$lib/markdown";
   import { remoteClient, remoteState } from "$lib/remote";
 
   const ITEM_LABELS: Record<string, string> = {
     userMessage: "You",
+    hookPrompt: "Hook",
     agentMessage: "Codex",
-    commandExecution: "Command",
+    plan: "Plan",
     reasoning: "Reasoning",
+    commandExecution: "Command",
     fileChange: "Files",
-    plan: "Plan"
+    mcpToolCall: "MCP tool",
+    dynamicToolCall: "Tool",
+    collabAgentToolCall: "Agent tool",
+    webSearch: "Search",
+    imageView: "Image",
+    imageGeneration: "Image",
+    enteredReviewMode: "Review",
+    exitedReviewMode: "Review",
+    contextCompaction: "Context"
   };
 
   let draft = "";
   let sendError = "";
+  let interruptError = "";
+  let interrupting = false;
+  let attachmentError = "";
+  let attachments: TurnAttachment[] = [];
   let appliedScrollSignature = "";
   let requestedThreadId = "";
+  let fileInput: HTMLInputElement;
   $: threadId = $page.params.id;
   $: state = $remoteState;
   $: thread = state.threads[threadId];
+  $: threadError = state.threadErrors[threadId];
   $: pendingTurn = state.pendingTurns[threadId];
-  $: sending = pendingTurn?.status === "sending" || pendingTurn?.status === "accepted" || pendingTurn?.status === "running";
+  $: sending = pendingTurn?.status === "sending";
+  $: turnInFlight =
+    pendingTurn?.status === "sending" ||
+    pendingTurn?.status === "queued" ||
+    pendingTurn?.status === "accepted" ||
+    pendingTurn?.status === "running";
+  $: threadActive = Boolean(thread?.status && (thread.status === "active" || thread.status.startsWith("active:") || thread.status === "starting"));
+  $: canInterrupt = Boolean((threadActive || turnInFlight) && !interrupting && threadError?.code !== "thread_not_found");
+  $: canSubmit = Boolean((draft.trim() || attachments.length) && !sending && threadError?.code !== "thread_not_found");
+  $: canSteer = Boolean(canSubmit && threadActive);
   $: pending = state.attentions.filter(
     (item) => item.pendingApproval && (item.threadId === threadId || !item.threadId)
   );
@@ -58,23 +84,69 @@
     void remoteClient.readThread(threadId);
   }
   $: if (bottomContentSignature && appliedScrollSignature !== bottomContentSignature) {
-    const sameThread = appliedScrollSignature.startsWith(`${threadId}|`);
     appliedScrollSignature = bottomContentSignature;
-    void scrollLatest(sameThread ? "smooth" : "auto");
+    void scrollLatest("auto");
   }
 
-  async function send() {
+  async function send(mode: "next" | "steer" = "next") {
     const text = draft.trim();
-    if (!text || sending) return;
+    if ((!text && !attachments.length) || sending) return;
+    const outgoingAttachments = attachments;
     draft = "";
+    attachments = [];
     sendError = "";
+    interruptError = "";
+    attachmentError = "";
     try {
-      await remoteClient.sendTurn(threadId, text);
-      await scrollLatest("smooth");
+      await remoteClient.sendTurn(threadId, text, outgoingAttachments, mode);
+      await scrollLatest("auto");
     } catch (error) {
       sendError = error instanceof Error ? error.message : "Message failed to send";
       draft = draft.trim() ? `${text}\n\n${draft}` : text;
+      attachments = [...outgoingAttachments, ...attachments];
     }
+  }
+
+  async function interruptTurn() {
+    if (!canInterrupt) return;
+    interrupting = true;
+    interruptError = "";
+    try {
+      await remoteClient.interruptTurn(threadId);
+      await scrollLatest("auto");
+    } catch (error) {
+      interruptError = error instanceof Error ? error.message : "Stop request failed";
+    } finally {
+      interrupting = false;
+    }
+  }
+
+  function handleComposerKeydown(event: KeyboardEvent) {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    void send();
+  }
+
+  async function attachFiles(event: Event) {
+    attachmentError = "";
+    const input = event.currentTarget as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    input.value = "";
+    for (const file of files) {
+      if (attachments.length >= 4) {
+        attachmentError = "Attach up to 4 files per message.";
+        break;
+      }
+      try {
+        attachments = [...attachments, await fileToTurnAttachment(file)];
+      } catch (error) {
+        attachmentError = error instanceof Error ? error.message : "Could not attach file.";
+      }
+    }
+  }
+
+  function removeAttachment(id: string) {
+    attachments = attachments.filter((attachment) => attachment.id !== id);
   }
 
   async function scrollLatest(behavior: ScrollBehavior = "smooth") {
@@ -97,6 +169,35 @@
   function rendersMarkdown(type: string): boolean {
     return type === "agentMessage" || type === "plan" || type === "reasoning";
   }
+
+  function rendersPlainRichText(type: string): boolean {
+    return type === "userMessage";
+  }
+
+  function attachmentLabel(attachment: TurnAttachmentSummary): string {
+    return `${attachment.kind === "image" ? "Image" : "File"} · ${formatAttachmentSize(attachment.size)}`;
+  }
+
+  onMount(() => {
+    if (!browser || !window.visualViewport) return;
+    const viewport = window.visualViewport;
+    let lastOffset = 0;
+    const updateKeyboardOffset = () => {
+      const offset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      const rounded = Math.round(offset);
+      document.documentElement.style.setProperty("--composer-keyboard-offset", `${rounded}px`);
+      if (rounded > lastOffset) void scrollLatest("auto");
+      lastOffset = rounded;
+    };
+    updateKeyboardOffset();
+    viewport.addEventListener("resize", updateKeyboardOffset);
+    viewport.addEventListener("scroll", updateKeyboardOffset);
+    return () => {
+      viewport.removeEventListener("resize", updateKeyboardOffset);
+      viewport.removeEventListener("scroll", updateKeyboardOffset);
+      document.documentElement.style.removeProperty("--composer-keyboard-offset");
+    };
+  });
 </script>
 
 <svelte:head>
@@ -119,6 +220,17 @@
 
   {#if friendlyError}
     <div class="notice error">{friendlyError}</div>
+  {/if}
+
+  {#if threadError?.code === "thread_not_found"}
+    <div class="notice error stale-session">
+      <strong>This session is no longer available on this daemon.</strong>
+      <span>Refresh the inbox or open another session from this phone.</span>
+      <div>
+        <a class="small-button" href="/">Back to sessions</a>
+        <button class="small-button" on:click={() => remoteClient.requestSessions()}>Refresh sessions</button>
+      </div>
+    </div>
   {/if}
 
   <section class="thread-content">
@@ -152,9 +264,21 @@
             {#if item.text}
               {#if rendersMarkdown(item.type)}
                 <div class="markdown-body">{@html renderMarkdown(item.text)}</div>
+              {:else if rendersPlainRichText(item.type)}
+                <div class="markdown-body">{@html renderPlainTextWithDirectives(item.text)}</div>
               {:else}
                 <p>{item.text}</p>
               {/if}
+            {/if}
+            {#if item.attachments?.length}
+              <div class="attachment-list" aria-label="Message attachments">
+                {#each item.attachments as attachment}
+                  <span>
+                    <strong>{attachment.name}</strong>
+                    <small>{attachmentLabel(attachment)}</small>
+                  </span>
+                {/each}
+              </div>
             {/if}
             {#if item.command}
               <pre>{item.command}</pre>
@@ -191,34 +315,85 @@
         </section>
       {/if}
 
-      {#if pendingTurn && pendingTurn.status !== "completed"}
+      {#if pendingTurn && pendingTurn.status !== "completed" && !(latestItem?.type === "agentMessage" && pendingTurn.status === "running")}
         <div class="turn-state" class:error={pendingTurn.status === "failed"}>
-          <span>{pendingTurn.status === "failed" ? "Failed" : pendingTurn.status}</span>
-          {#if pendingTurn.error}
-            <strong>{pendingTurn.error}</strong>
-          {:else if pendingTurn.status === "sending"}
-            <strong>Sending to daemon...</strong>
-          {:else if pendingTurn.status === "accepted"}
-            <strong>Codex accepted the turn.</strong>
-          {:else if pendingTurn.status === "running"}
-            <strong>Codex is working.</strong>
+          {#if pendingTurn.status === "failed"}
+            <span>Failed</span>
+            <strong>{pendingTurn.error ?? "Codex could not handle the turn."}</strong>
+          {:else if pendingTurn.status === "queued"}
+            <span>queued</span>
+            <strong>Queued as the next instruction.</strong>
+          {:else if pendingTurn.status === "interrupted"}
+            <span>stopped</span>
+            <strong>{pendingTurn.error ?? "Stopped."}</strong>
+          {:else}
+            <span class="thinking-dot" aria-hidden="true"></span>
+            <strong>Codex is thinking...</strong>
           {/if}
         </div>
       {/if}
     {/if}
   </section>
 
-  <form class="composer" on:submit|preventDefault={send}>
+  <form class="composer" on:submit|preventDefault={() => send()}>
     {#if sendError}
       <p class="inline-error">{sendError}</p>
     {/if}
-    <textarea bind:value={draft} placeholder="Message Codex..." rows="2"></textarea>
-    <div>
+    {#if interruptError}
+      <p class="inline-error">{interruptError}</p>
+    {/if}
+    {#if attachmentError}
+      <p class="inline-error">{attachmentError}</p>
+    {/if}
+    {#if attachments.length}
+      <div class="attachment-tray" aria-label="Selected attachments">
+        {#each attachments as attachment}
+          <span>
+            <strong>{attachment.name}</strong>
+            <small>{attachmentLabel(attachment)}</small>
+            <button type="button" aria-label={`Remove ${attachment.name}`} on:click={() => removeAttachment(attachment.id)}>
+              <X size={14} strokeWidth={2.4} aria-hidden="true" />
+            </button>
+          </span>
+        {/each}
+      </div>
+    {/if}
+    <textarea
+      bind:value={draft}
+      aria-label="Message Codex"
+      placeholder="Message Codex..."
+      rows="2"
+      enterkeyhint="send"
+      disabled={threadError?.code === "thread_not_found"}
+      on:keydown={handleComposerKeydown}
+    ></textarea>
+    <input
+      bind:this={fileInput}
+      class="visually-hidden"
+      type="file"
+      multiple
+      accept="image/*,text/*,.md,.txt,.json,.ts,.tsx,.js,.jsx,.svelte,.css,.html,.xml,.yaml,.yml,.toml,.py,.rs,.go,.sh,.log,.csv"
+      on:change={attachFiles}
+    />
+    <div class="composer-actions">
+      <button type="button" class="icon-button bordered" aria-label="Attach file" title="Attach file" on:click={() => fileInput.click()}>
+        <Paperclip size={22} strokeWidth={2.5} aria-hidden="true" />
+      </button>
       <button type="button" class="icon-button bordered" aria-label="Scroll to latest" title="Scroll to latest" on:click={() => scrollLatest()}>
         <ArrowDown size={24} strokeWidth={2.5} aria-hidden="true" />
       </button>
-      <span class="mode-chip">{sending ? statusLabel(pendingTurn?.status) : "Codex"}</span>
-      <button class="send-button" disabled={!draft.trim() || sending} aria-label="Send" title="Send">
+      {#if canInterrupt}
+        <button type="button" class="icon-button bordered stop-button" aria-label="Stop session" title="Stop session" on:click={interruptTurn}>
+          <CircleStop size={22} strokeWidth={2.5} aria-hidden="true" />
+        </button>
+      {/if}
+      <span class="mode-chip">{turnInFlight ? statusLabel(pendingTurn?.status) : "Codex"}</span>
+      {#if canSteer}
+        <button type="button" class="icon-button bordered" aria-label="Force steer" title="Force steer" on:click={() => send("steer")}>
+          <Zap size={21} strokeWidth={2.5} aria-hidden="true" />
+        </button>
+      {/if}
+      <button class="send-button" disabled={!canSubmit} aria-label="Send" title="Send">
         <ArrowUp size={27} strokeWidth={2.8} aria-hidden="true" />
       </button>
     </div>

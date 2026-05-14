@@ -1,14 +1,19 @@
 import { browser } from "$app/environment";
+import { goto } from "$app/navigation";
 import { env } from "$env/dynamic/public";
-import { writable } from "svelte/store";
+import { get, writable } from "svelte/store";
 import {
   addOptimisticTurn,
+  applySessionsSnapshot,
   appendAgentDelta,
   initialState,
+  markThreadInterrupted,
   markPendingTurn,
   markPendingTurnByRequest,
   mergeThreadSnapshot,
+  rememberOpenedThread,
   seedSessionThread,
+  setThreadError,
   withoutKey,
   type MobilePeer,
   type RemoteUiState
@@ -32,12 +37,13 @@ import {
   type RelayControlMessage,
   type RelayWireMessage,
   type SessionSummary,
+  type TurnAttachment,
   type WebPushSubscriptionJson
 } from "@armorer/gauntlet-shared";
 import type { CodexEvent } from "@armorer/gauntlet-shared";
 
 const STORAGE_KEY = "armorer-gauntlet-state-v1";
-const CACHE_KEY = "armorer-gauntlet-cache-v1";
+const CACHE_PREFIX = "armorer-gauntlet-cache-v1";
 
 interface PersistedState {
   identity: DeviceIdentity;
@@ -47,9 +53,11 @@ interface PersistedState {
 
 interface CachedUiState {
   daemon?: RemoteUiState["daemon"];
+  daemonId?: string;
   sessions: RemoteUiState["sessions"];
   threads: RemoteUiState["threads"];
   attentions: RemoteUiState["attentions"];
+  lastOpenedThreadId?: string;
   cachedAt: string;
 }
 
@@ -66,10 +74,17 @@ class RemoteClient {
   private mockMode = false;
   private seq = 1;
   private pendingTurnRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  private pendingInterruptRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  private pendingThreadReads = new Map<string, string>();
+  private threadReadRetryCounts = new Map<string, number>();
+  private mockSoftReadMisses = new Set<string>();
+  private mockUnloadedSendMisses = new Set<string>();
   private pendingSessionCreates = new Map<
     string,
     { resolve: (session: SessionSummary) => void; reject: (error: Error) => void; initialMessage?: string }
   >();
+  private autoOpenLatestAfterNextSessions = false;
+  private mockInterruptedThreads = new Set<string>();
 
   async initialize(): Promise<void> {
     if (!browser) return;
@@ -81,7 +96,7 @@ class RemoteClient {
     }
     this.persisted = await this.loadOrCreateState();
     const pairingPayload = consumePairingPayloadFromUrl();
-    const cached = loadCachedUiState();
+    const cached = pairingPayload ? undefined : loadCachedUiState(this.persisted.peer?.daemonId);
     remoteState.update((state) => ({
       ...state,
       ...(cached
@@ -89,7 +104,8 @@ class RemoteClient {
             daemon: cached.daemon,
             sessions: cached.sessions,
             threads: cached.threads,
-            attentions: cached.attentions
+            attentions: cached.attentions,
+            lastOpenedThreadId: cached.lastOpenedThreadId
           }
         : {}),
       ready: true,
@@ -109,6 +125,7 @@ class RemoteClient {
     } else if (this.persisted.peer) {
       try {
         await this.connect();
+        this.autoOpenLatestAfterNextSessions = isStandaloneDisplay() && window.location.pathname === "/";
         this.requestSessions();
       } catch {
         remoteState.update((state) => ({
@@ -137,6 +154,7 @@ class RemoteClient {
     };
     this.saveState();
     await this.connect();
+    this.autoOpenLatestAfterNextSessions = window.location.pathname === "/";
     this.sendControl({
       type: "pair.claim",
       daemonId: payload.daemonId,
@@ -157,23 +175,43 @@ class RemoteClient {
   }
 
   async readThread(threadId: string): Promise<void> {
-    if (this.mockMode) return;
+    if (this.mockMode) {
+      this.mockReadThread(threadId);
+      return;
+    }
+    const requestId = randomId("req");
+    this.pendingThreadReads.set(requestId, threadId);
+    remoteState.update((state) => rememberOpenedThread(state, threadId));
     await this.sendAppMessage({
       type: "thread.read",
-      requestId: randomId("req"),
+      requestId,
       threadId
     });
   }
 
-  async sendTurn(threadId: string, text: string): Promise<void> {
+  async sendTurn(
+    threadId: string,
+    text: string,
+    attachments: TurnAttachment[] = [],
+    mode: "next" | "steer" = "next"
+  ): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && !attachments.length) return;
     if (this.mockMode) {
-      await this.mockSendTurn(threadId, trimmed);
+      await this.mockSendTurn(threadId, trimmed, attachments, mode);
       return;
     }
     const requestId = randomId("req");
-    remoteState.update((state) => addOptimisticTurn(state, threadId, requestId, trimmed));
+    remoteState.update((state) =>
+      addOptimisticTurn(
+        state,
+        threadId,
+        requestId,
+        trimmed,
+        attachments.map(({ data, encoding, ...summary }) => summary),
+        mode === "next" && isActiveThreadStatus(state.threads[threadId]?.status) ? "next" : "current"
+      )
+    );
     const accepted = new Promise<void>((resolve, reject) => {
       this.pendingTurnRequests.set(requestId, { resolve, reject });
       window.setTimeout(() => {
@@ -190,7 +228,9 @@ class RemoteClient {
         type: "turn.start",
         requestId,
         threadId,
-        text: trimmed
+        text: trimmed,
+        mode,
+        ...(attachments.length ? { attachments } : {})
       });
     } catch (error) {
       this.pendingTurnRequests.delete(requestId);
@@ -199,6 +239,33 @@ class RemoteClient {
       throw error;
     }
     await accepted;
+  }
+
+  async interruptTurn(threadId: string): Promise<void> {
+    if (this.mockMode) {
+      this.mockInterruptTurn(threadId);
+      return;
+    }
+    const requestId = randomId("req");
+    const interrupted = new Promise<void>((resolve, reject) => {
+      this.pendingInterruptRequests.set(requestId, { resolve, reject });
+      window.setTimeout(() => {
+        if (!this.pendingInterruptRequests.has(requestId)) return;
+        this.pendingInterruptRequests.delete(requestId);
+        reject(new Error("Codex did not acknowledge the stop request in time."));
+      }, 15_000);
+    });
+    try {
+      await this.sendAppMessage({
+        type: "turn.interrupt",
+        requestId,
+        threadId
+      });
+    } catch (error) {
+      this.pendingInterruptRequests.delete(requestId);
+      throw error;
+    }
+    await interrupted;
   }
 
   async createSession(cwd: string, initialMessage?: string): Promise<SessionSummary> {
@@ -282,6 +349,7 @@ class RemoteClient {
 
   clear(): void {
     localStorage.removeItem(STORAGE_KEY);
+    removeCachedUiStates();
     this.cancelReconnect();
     const socket = this.socket;
     this.socket = undefined;
@@ -470,14 +538,15 @@ class RemoteClient {
   private applyAppMessage(message: AppMessage): void {
     switch (message.type) {
       case "sessions.snapshot":
-        remoteState.update((state) =>
-          persistUiCache({
-            ...state,
-            daemon: message.daemon,
-            sessions: message.sessions,
-            error: undefined
-          })
-        );
+        remoteState.update((state) => persistUiCache(applySessionsSnapshot(state, message.sessions, message.daemon)));
+        if (this.autoOpenLatestAfterNextSessions) {
+          this.autoOpenLatestAfterNextSessions = false;
+          const lastOpenedThreadId = get(remoteState).lastOpenedThreadId;
+          const latest = message.sessions.find((session) => session.id === lastOpenedThreadId) ?? message.sessions[0];
+          if (latest && window.location.pathname === "/") {
+            void goto(`/sessions/${latest.id}`);
+          }
+        }
         return;
       case "daemon.status":
         remoteState.update((state) =>
@@ -489,6 +558,8 @@ class RemoteClient {
         );
         return;
       case "thread.snapshot":
+        this.pendingThreadReads.delete(message.requestId);
+        this.threadReadRetryCounts.delete(message.thread.id);
         remoteState.update((state) =>
           persistUiCache({
             ...state,
@@ -496,9 +567,11 @@ class RemoteClient {
               ...state.threads,
               [message.thread.id]: mergeThreadSnapshot(state, message.thread)
             },
+            threadErrors: withoutKey(state.threadErrors, message.thread.id),
             pendingTurns:
               state.pendingTurns[message.thread.id]?.status === "completed" ||
-              state.pendingTurns[message.thread.id]?.status === "failed"
+              state.pendingTurns[message.thread.id]?.status === "failed" ||
+              state.pendingTurns[message.thread.id]?.status === "interrupted"
                 ? withoutKey(state.pendingTurns, message.thread.id)
                 : state.pendingTurns,
             error: undefined
@@ -550,14 +623,33 @@ class RemoteClient {
         remoteState.update((state) => markPendingTurn(state, message.threadId, "accepted"));
         void this.readThread(message.threadId);
         return;
+      case "turn.queued":
+        this.pendingTurnRequests.get(message.requestId)?.resolve();
+        this.pendingTurnRequests.delete(message.requestId);
+        remoteState.update((state) => markPendingTurn(state, message.threadId, "queued"));
+        return;
+      case "turn.interrupted":
+        this.pendingInterruptRequests.get(message.requestId)?.resolve();
+        this.pendingInterruptRequests.delete(message.requestId);
+        remoteState.update((state) => persistUiCache(markThreadInterrupted(state, message.threadId)));
+        void this.readThread(message.threadId);
+        void this.requestSessions();
+        return;
       case "error":
+        if (message.code === "thread_not_found") {
+          if (this.handleSoftThreadNotFound(message.requestId, message.message)) return;
+          this.markThreadNotFound(message.requestId, message.message);
+          this.rejectPending(message.requestId, "This session is no longer available on this daemon.");
+          return;
+        }
         this.rejectPending(message.requestId, message.message);
-        if (isThreadPreparingError(message.message)) return;
+        if (message.code === "thread_preparing" || isThreadPreparingError(message.message)) return;
         remoteState.update((state) => ({ ...state, error: message.message }));
         return;
       case "sessions.list":
       case "thread.read":
       case "turn.start":
+      case "turn.interrupt":
       case "session.create":
       case "pairings.revoke_all":
       case "approval.respond":
@@ -572,9 +664,54 @@ class RemoteClient {
     const error = new Error(message);
     this.pendingTurnRequests.get(requestId)?.reject(error);
     this.pendingTurnRequests.delete(requestId);
+    this.pendingInterruptRequests.get(requestId)?.reject(error);
+    this.pendingInterruptRequests.delete(requestId);
+    this.pendingThreadReads.delete(requestId);
     this.pendingSessionCreates.get(requestId)?.reject(error);
     this.pendingSessionCreates.delete(requestId);
     remoteState.update((state) => markPendingTurnByRequest(state, requestId, "failed", message));
+  }
+
+  private handleSoftThreadNotFound(requestId: string | undefined, message: string): boolean {
+    if (!requestId) return false;
+    const state = get(remoteState);
+    const readThreadId = this.pendingThreadReads.get(requestId);
+    if (readThreadId && isKnownOrPendingThread(state, readThreadId)) {
+      this.pendingThreadReads.delete(requestId);
+      const retryCount = this.threadReadRetryCounts.get(readThreadId) ?? 0;
+      if (retryCount < 4) {
+        this.threadReadRetryCounts.set(readThreadId, retryCount + 1);
+        window.setTimeout(() => {
+          void this.readThread(readThreadId);
+        }, 180 + retryCount * 220);
+      }
+      return true;
+    }
+
+    const pendingThreadId = Object.entries(state.pendingTurns).find(([, pending]) => pending.requestId === requestId)?.[0];
+    if (pendingThreadId && isKnownThread(state, pendingThreadId)) {
+      this.rejectPending(requestId, "Codex could not attach to this session. Refreshing sessions...");
+      void this.requestSessions();
+      window.setTimeout(() => {
+        void this.readThread(pendingThreadId);
+      }, 350);
+      return true;
+    }
+
+    return false;
+  }
+
+  private markThreadNotFound(requestId: string | undefined, message: string): void {
+    const threadId =
+      (requestId ? this.pendingThreadReads.get(requestId) : undefined) ??
+      (requestId
+        ? Object.entries(get(remoteState).pendingTurns).find(([, pending]) => pending.requestId === requestId)?.[0]
+        : undefined);
+    if (!threadId) return;
+    this.pendingThreadReads.delete(requestId ?? "");
+    remoteState.update((state) =>
+      isKnownThread(state, threadId) ? state : setThreadError(state, threadId, "thread_not_found", message)
+    );
   }
 
   private async sendAppMessage(message: AppMessage): Promise<void> {
@@ -670,16 +807,84 @@ class RemoteClient {
     return session;
   }
 
-  private async mockSendTurn(threadId: string, text: string): Promise<void> {
+  private mockReadThread(threadId: string): void {
+    const requestId = randomId("mock_read");
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("softReadMiss") === "1" && !this.mockSoftReadMisses.has(threadId)) {
+      this.mockSoftReadMisses.add(threadId);
+      this.pendingThreadReads.set(requestId, threadId);
+      this.applyAppMessage({
+        type: "error",
+        requestId,
+        code: "thread_not_found",
+        message: `thread not found: ${threadId}`
+      });
+      return;
+    }
+
+    const thread = get(remoteState).threads[threadId] ?? mockThread(threadId);
+    this.applyAppMessage({
+      type: "thread.snapshot",
+      requestId,
+      thread
+    });
+  }
+
+  private async mockSendTurn(
+    threadId: string,
+    text: string,
+    attachments: TurnAttachment[] = [],
+    mode: "next" | "steer" = "next"
+  ): Promise<void> {
+    if (threadId.startsWith("mock-stale")) {
+      remoteState.update((state) =>
+        setThreadError(state, threadId, "thread_not_found", "This session is no longer available on this daemon.")
+      );
+      throw new Error("This session is no longer available on this daemon.");
+    }
     const requestId = randomId("mock_req");
-    remoteState.update((state) => addOptimisticTurn(state, threadId, requestId, text));
+    this.mockInterruptedThreads.delete(threadId);
+    const summaries = attachments.map(({ data, encoding, ...summary }) => summary);
+    remoteState.update((state) =>
+      addOptimisticTurn(
+        state,
+        threadId,
+        requestId,
+        text,
+        summaries,
+        mode === "next" && isActiveThreadStatus(state.threads[threadId]?.status) ? "next" : "current"
+      )
+    );
+    const url = new URL(window.location.href);
+    const active = url.searchParams.get("active") === "1";
+    const unloadedOnSend =
+      url.searchParams.get("unloadedOnSend") === "1" && !this.mockUnloadedSendMisses.has(threadId);
+    if (unloadedOnSend) this.mockUnloadedSendMisses.add(threadId);
+    if (active && mode === "next") {
+      window.setTimeout(() => {
+        if (this.mockInterruptedThreads.has(threadId)) return;
+        remoteState.update((state) => markPendingTurn(state, threadId, "queued"));
+      }, 60);
+      window.setTimeout(() => {
+        if (this.mockInterruptedThreads.has(threadId)) return;
+        remoteState.update((state) => markPendingTurn(state, threadId, "accepted"));
+      }, 420);
+      window.setTimeout(() => {
+        if (this.mockInterruptedThreads.has(threadId)) return;
+        remoteState.update((state) => markPendingTurn(state, threadId, "running"));
+      }, 520);
+    } else {
+      window.setTimeout(() => {
+        if (this.mockInterruptedThreads.has(threadId)) return;
+        remoteState.update((state) => markPendingTurn(state, threadId, mode === "steer" ? "running" : "accepted"));
+      }, unloadedOnSend ? 360 : 60);
+      window.setTimeout(() => {
+        if (this.mockInterruptedThreads.has(threadId)) return;
+        remoteState.update((state) => markPendingTurn(state, threadId, "running"));
+      }, unloadedOnSend ? 440 : 140);
+    }
     window.setTimeout(() => {
-      remoteState.update((state) => markPendingTurn(state, threadId, "accepted"));
-    }, 60);
-    window.setTimeout(() => {
-      remoteState.update((state) => markPendingTurn(state, threadId, "running"));
-    }, 140);
-    window.setTimeout(() => {
+      if (this.mockInterruptedThreads.has(threadId)) return;
       remoteState.update((state) => {
         const snapshot = {
           ...(state.threads[threadId] ?? mockThread(threadId)),
@@ -690,11 +895,18 @@ class RemoteClient {
               id: "mock-authoritative-turn",
               status: "running",
               items: [
-                { id: "mock-authoritative-user", type: "userMessage", text },
+                { id: "mock-authoritative-user", type: "userMessage", text, attachments: summaries },
                 {
                   id: "mock-authoritative-agent",
                   type: "agentMessage",
-                  text: "Working **from** the test fixture.\n\n- Markdown is enabled\n- Mobile stays stable"
+                  text: [
+                    "Working **from** the test fixture.",
+                    "",
+                    "- Markdown is enabled",
+                    "- Mobile stays stable",
+                    "",
+                    "::git-stage{cwd=\"/Users/example/Projects/armorer-gauntlet\"} ::git-commit{cwd=\"/Users/example/Projects/armorer-gauntlet\"} ::git-push{cwd=\"/Users/example/Projects/armorer-gauntlet\" branch=\"main\"}"
+                  ].join("\n")
                 }
               ]
             }
@@ -705,10 +917,16 @@ class RemoteClient {
           threads: {
             ...state.threads,
             [threadId]: mergeThreadSnapshot(state, snapshot)
-          }
+          },
+          pendingTurns: withoutKey(state.pendingTurns, threadId)
         };
       });
-    }, 260);
+    }, active && mode === "next" ? 720 : unloadedOnSend ? 620 : 260);
+  }
+
+  private mockInterruptTurn(threadId: string): void {
+    this.mockInterruptedThreads.add(threadId);
+    remoteState.update((state) => markThreadInterrupted(state, threadId));
   }
 }
 
@@ -751,6 +969,13 @@ function isMockRemoteEnabled(): boolean {
   return env.PUBLIC_GAUNTLET_E2E_MOCK === "true" || new URL(window.location.href).searchParams.get("mock") === "e2e";
 }
 
+function isStandaloneDisplay(): boolean {
+  return (
+    window.matchMedia("(display-mode: standalone)").matches ||
+    Boolean((navigator as Navigator & { standalone?: boolean }).standalone)
+  );
+}
+
 function isThreadPreparingError(message: string): boolean {
   return (
     message.includes("no rollout found for thread id") ||
@@ -761,16 +986,35 @@ function isThreadPreparingError(message: string): boolean {
   );
 }
 
-function loadCachedUiState(): CachedUiState | undefined {
+function isActiveThreadStatus(status: string | undefined): boolean {
+  return Boolean(status && (status === "active" || status.startsWith("active:") || status === "starting"));
+}
+
+function isKnownOrPendingThread(state: RemoteUiState, threadId: string): boolean {
+  return Boolean(
+    isKnownThread(state, threadId) ||
+      state.pendingTurns[threadId]
+  );
+}
+
+function isKnownThread(state: RemoteUiState, threadId: string): boolean {
+  return Boolean(state.threads[threadId] || state.sessions.some((session) => session.id === threadId));
+}
+
+function loadCachedUiState(daemonId: string | undefined): CachedUiState | undefined {
+  if (!daemonId) return undefined;
   try {
-    const raw = localStorage.getItem(CACHE_KEY);
+    const raw = localStorage.getItem(cacheKey(daemonId));
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as Partial<CachedUiState>;
+    if (parsed.daemonId && parsed.daemonId !== daemonId) return undefined;
     return {
+      daemonId,
       sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
       threads: parsed.threads && typeof parsed.threads === "object" ? parsed.threads : {},
       attentions: Array.isArray(parsed.attentions) ? parsed.attentions : [],
       ...(parsed.daemon ? { daemon: parsed.daemon } : {}),
+      ...(typeof parsed.lastOpenedThreadId === "string" ? { lastOpenedThreadId: parsed.lastOpenedThreadId } : {}),
       cachedAt: typeof parsed.cachedAt === "string" ? parsed.cachedAt : new Date(0).toISOString()
     };
   } catch {
@@ -780,14 +1024,18 @@ function loadCachedUiState(): CachedUiState | undefined {
 
 function persistUiCache(state: RemoteUiState): RemoteUiState {
   if (!browser) return state;
+  const daemonId = state.peer?.daemonId ?? state.daemon?.id;
+  if (!daemonId) return state;
   try {
     localStorage.setItem(
-      CACHE_KEY,
+      cacheKey(daemonId),
       JSON.stringify({
+        daemonId,
         daemon: state.daemon,
         sessions: state.sessions.slice(0, 80),
         threads: Object.fromEntries(Object.entries(state.threads).slice(0, 80)),
         attentions: state.attentions.slice(0, 20),
+        lastOpenedThreadId: state.lastOpenedThreadId,
         cachedAt: new Date().toISOString()
       } satisfies CachedUiState)
     );
@@ -797,18 +1045,31 @@ function persistUiCache(state: RemoteUiState): RemoteUiState {
   return state;
 }
 
+function cacheKey(daemonId: string): string {
+  return `${CACHE_PREFIX}:${daemonId}`;
+}
+
+function removeCachedUiStates(): void {
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(CACHE_PREFIX)) localStorage.removeItem(key);
+  }
+}
+
 function createMockState(): RemoteUiState {
+  const url = new URL(window.location.href);
+  const activeThread = url.searchParams.get("active") === "1";
   const session = mockSession({
     id: "mock-existing-session",
     name: "Reply with exactly MOBILE_E2E_OK",
     preview: "Hi.",
     cwd: "/Users/example/Projects/armorer-gauntlet-e2e-workspace",
-    status: "idle",
+    status: activeThread ? "active" : "idle",
     updatedAt: Date.now() / 1000
   });
-  const approval = new URL(window.location.href).searchParams.get("approval") === "1";
-  const readyAttention = new URL(window.location.href).searchParams.get("ready") === "1";
-  const longThread = new URL(window.location.href).searchParams.get("long") === "1";
+  const approval = url.searchParams.get("approval") === "1";
+  const readyAttention = url.searchParams.get("ready") === "1";
+  const longThread = url.searchParams.get("long") === "1";
   const attentions: AttentionEvent[] = [];
   if (approval) {
     attentions.push({
@@ -838,6 +1099,11 @@ function createMockState(): RemoteUiState {
       body: "A session finished running and is waiting for instructions.",
       reason: "idle",
       createdAt: new Date().toISOString()
+    });
+  }
+  if (url.searchParams.get("autoLatest") === "1" && window.location.pathname === "/") {
+    queueMicrotask(() => {
+      void goto(`/sessions/${session.id}`);
     });
   }
   return {
@@ -949,7 +1215,12 @@ function applyCodexEvent(state: RemoteUiState, event: CodexEvent): RemoteUiState
     });
   }
   if (event.type === "turn.completed") {
-    next = markPendingTurn(next, event.threadId, event.status === "failed" ? "failed" : "completed", event.error);
+    next = markPendingTurn(
+      next,
+      event.threadId,
+      event.status === "failed" ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
+      event.error
+    );
     queueMicrotask(() => {
       void remoteClient.readThread(event.threadId);
       void remoteClient.requestSessions();

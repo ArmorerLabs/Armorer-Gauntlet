@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import {
   type AttentionEvent,
   type CodexEvent,
@@ -6,6 +7,7 @@ import {
   type SessionSummary,
   type ThreadItemSnapshot,
   type ThreadTurnSnapshot,
+  type TurnAttachmentSummary,
   randomId,
   textStatusFromCodexStatus,
   toResumeCommand,
@@ -256,10 +258,12 @@ function snapshotItem(item: unknown): ThreadItemSnapshot {
   const type = optionalString(data.type) ?? "unknown";
   const id = optionalString(data.id) ?? randomId("item");
   if (type === "userMessage") {
+    const content = extractUserMessageContent(data);
     return {
       id,
       type,
-      text: extractUserMessageText(data)
+      text: content.text,
+      ...(content.attachments.length ? { attachments: content.attachments } : {})
     };
   }
   if (type === "agentMessage" || type === "plan") {
@@ -276,6 +280,16 @@ function snapshotItem(item: unknown): ThreadItemSnapshot {
       text: [...stringArray(data.summary), ...stringArray(data.content)].join("\n\n")
     };
   }
+  if (type === "hookPrompt") {
+    return {
+      id,
+      type,
+      text: arrayRecords(data.fragments)
+        .map((fragment) => optionalString(fragment.text) ?? "")
+        .filter(Boolean)
+        .join("\n")
+    };
+  }
   if (type === "commandExecution") {
     return {
       id,
@@ -286,28 +300,184 @@ function snapshotItem(item: unknown): ThreadItemSnapshot {
     };
   }
   if (type === "fileChange") {
+    const changes = arrayRecords(data.changes);
+    const diff = changes
+      .map((change) => optionalString(change.diff) ?? "")
+      .filter(Boolean)
+      .join("\n\n");
     return {
       id,
       type,
-      text: "File changes",
+      text: fileChangeSummary(changes),
+      ...(diff ? { diff } : {}),
       status: optionalString(data.status)
+    };
+  }
+  if (type === "mcpToolCall") {
+    return {
+      id,
+      type,
+      text: [`${optionalString(data.server) ?? "MCP"}.${optionalString(data.tool) ?? "tool"}`, statusLine(data.status)]
+        .filter(Boolean)
+        .join("\n"),
+      output: [formatJson(data.result), errorMessage(data.error)].filter(Boolean).join("\n\n") || undefined,
+      status: optionalString(data.status)
+    };
+  }
+  if (type === "dynamicToolCall") {
+    const content = dynamicContentText(data.contentItems);
+    return {
+      id,
+      type,
+      text: [`Tool: ${optionalString(data.tool) ?? "unknown"}`, statusLine(data.status), ...content]
+        .filter(Boolean)
+        .join("\n"),
+      output: formatJson(data.arguments),
+      status: optionalString(data.status)
+    };
+  }
+  if (type === "collabAgentToolCall") {
+    return {
+      id,
+      type,
+      text: [
+        `Agent tool: ${optionalString(data.tool) ?? "unknown"}`,
+        statusLine(data.status),
+        optionalString(data.prompt)
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      output: formatJson(data.agentsStates),
+      status: optionalString(data.status)
+    };
+  }
+  if (type === "webSearch") {
+    return {
+      id,
+      type,
+      text: [`Search: ${optionalString(data.query) ?? ""}`, formatJson(data.action)].filter(Boolean).join("\n")
+    };
+  }
+  if (type === "imageView") {
+    const path = optionalString(data.path) ?? "";
+    return {
+      id,
+      type,
+      text: path ? `Image: ${path}` : "Image",
+      attachments: path
+        ? [
+            {
+              id: randomId("att"),
+              name: basename(path),
+              mimeType: "image/*",
+              size: 0,
+              kind: "image"
+            }
+          ]
+        : undefined
+    };
+  }
+  if (type === "imageGeneration") {
+    return {
+      id,
+      type,
+      text: [
+        `Image generation: ${optionalString(data.status) ?? "unknown"}`,
+        optionalString(data.revisedPrompt),
+        optionalString(data.savedPath) ? `Saved: ${optionalString(data.savedPath)}` : "",
+        optionalString(data.result)
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      status: optionalString(data.status)
+    };
+  }
+  if (type === "enteredReviewMode" || type === "exitedReviewMode") {
+    return {
+      id,
+      type,
+      text: optionalString(data.review) ?? ""
+    };
+  }
+  if (type === "contextCompaction") {
+    return {
+      id,
+      type,
+      text: "Context compacted."
     };
   }
   return { id, type };
 }
 
-function extractUserMessageText(data: Record<string, unknown>): string {
+function fileChangeSummary(changes: Array<Record<string, unknown>>): string {
+  if (!changes.length) return "File changes";
+  return changes
+    .map((change) => {
+      const path = optionalString(change.path) ?? "file";
+      const kind = asRecord(change.kind);
+      const type = optionalString(kind.type) ?? "update";
+      const moved = optionalString(kind.move_path);
+      return moved ? `${type}: ${moved} -> ${path}` : `${type}: ${path}`;
+    })
+    .join("\n");
+}
+
+function dynamicContentText(value: unknown): string[] {
+  return arrayRecords(value)
+    .map((item) => {
+      if (item.type === "inputText") return optionalString(item.text) ?? "";
+      if (item.type === "inputImage") return `[image: ${optionalString(item.imageUrl) ?? ""}]`;
+      return `[${optionalString(item.type) ?? "content"}]`;
+    })
+    .filter(Boolean);
+}
+
+function statusLine(value: unknown): string {
+  const status = optionalString(value);
+  return status ? `Status: ${status}` : "";
+}
+
+function errorMessage(value: unknown): string | undefined {
+  const message = optionalString(asRecord(value).message);
+  return message ? `Error: ${message}` : undefined;
+}
+
+function formatJson(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractUserMessageContent(data: Record<string, unknown>): {
+  text: string;
+  attachments: TurnAttachmentSummary[];
+} {
   const content = Array.isArray(data.content) ? data.content : [];
-  return content
+  const attachments: TurnAttachmentSummary[] = [];
+  const text = content
     .map((part) => {
       const item = asRecord(part);
       if (item.type === "text") return optionalString(item.text) ?? "";
-      if (item.type === "image") return "[image]";
-      if (item.type === "localImage") return `[image: ${optionalString(item.path) ?? ""}]`;
+      if (item.type === "image" || item.type === "localImage") {
+        const path = optionalString(item.path) ?? optionalString(item.url) ?? "";
+        attachments.push({
+          id: optionalString(item.id) ?? randomId("att"),
+          name: path ? basename(path) : "image",
+          mimeType: optionalString(item.mimeType) ?? "image/*",
+          size: optionalNumber(item.size) ?? 0,
+          kind: "image"
+        });
+        return "";
+      }
       return `[${optionalString(item.type) ?? "item"}]`;
     })
     .filter(Boolean)
     .join("\n");
+  return { text, attachments };
 }
 
 function createAttention(input: {
@@ -357,7 +527,7 @@ function numberField(data: Record<string, unknown>, key: string): number {
   return value;
 }
 
-function optionalString(value: unknown): string | undefined {
+export function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
@@ -369,10 +539,14 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function arrayRecords(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.map(asRecord) : [];
+}
+
 function firstLine(value: string): string {
   return value.split(/\r?\n/)[0]?.trim() || "Untitled session";
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
+export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }

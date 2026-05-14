@@ -12,6 +12,7 @@ import {
 } from "@armorer/gauntlet-shared";
 import { WebSocket } from "ws";
 import { type DaemonConfig, type MobilePairing, saveConfig } from "./config.js";
+import { errorMessage, log } from "./logger.js";
 
 export interface DaemonRelayClientOptions {
   config: DaemonConfig;
@@ -35,8 +36,14 @@ export class DaemonRelayClient {
     });
     socket.on("message", (raw) => {
       this.handleWireMessage(raw.toString()).catch((error) => {
-        console.warn("relay message failed", error);
+        log.warn("relay message failed", errorMessage(error));
       });
+    });
+    socket.on("error", (error) => {
+      log.error("relay socket error", errorMessage(error));
+    });
+    socket.on("close", (code, reason) => {
+      log.warn("relay socket closed", { code, reason: reason?.toString() });
     });
     this.sendControl({
       type: "hello",
@@ -64,6 +71,7 @@ export class DaemonRelayClient {
   ): Promise<void> {
     const key = await this.getKey(mobileId);
     const encrypted = await encryptAppMessage(key, message);
+    log.debug("relay send", () => ({ to: mobileId, kind, seq: this.seq, message: message.type }));
     this.send({
       type: "e2ee",
       header: createRelayHeader({
@@ -97,9 +105,11 @@ export class DaemonRelayClient {
   private async handleWireMessage(raw: string): Promise<void> {
     const message = parseRelayWireMessage(raw);
     if (message.type === "control") {
+      log.debug("relay recv control", () => ({ control: message.control.type }));
       await this.handleControl(message.control);
       return;
     }
+    log.debug("relay recv e2ee", () => ({ from: message.header.from, kind: message.header.kind, seq: message.header.seq }));
     const key = await this.getKey(message.header.from);
     const appMessage = await decryptAppMessage(key, message.body);
     await this.options.onMessage(appMessage, message.header.from);

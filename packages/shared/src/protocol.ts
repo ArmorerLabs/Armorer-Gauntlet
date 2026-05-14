@@ -21,6 +21,28 @@ export type RelayFrameKind =
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
+export type TurnMode = "next" | "steer";
+export type AppErrorCode = "thread_not_found" | "thread_busy" | "thread_preparing" | "daemon_request_failed";
+export type TurnAttachmentKind = "image" | "text";
+export type TurnAttachmentEncoding = "base64" | "utf8";
+
+export interface TurnAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  kind: TurnAttachmentKind;
+  encoding: TurnAttachmentEncoding;
+  data: string;
+}
+
+export interface TurnAttachmentSummary {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  kind: TurnAttachmentKind;
+}
 
 export interface PublicKeyJwk {
   crv: string;
@@ -179,12 +201,32 @@ export type AppMessage =
       requestId: string;
       threadId: string;
       text: string;
+      mode?: TurnMode | undefined;
+      attachments?: TurnAttachment[] | undefined;
+    }
+  | {
+      type: "turn.queued";
+      requestId: string;
+      threadId: string;
+      queueDepth: number;
     }
   | {
       type: "turn.accepted";
       requestId: string;
       threadId: string;
       turnId?: string | undefined;
+    }
+  | {
+      type: "turn.interrupt";
+      requestId: string;
+      threadId: string;
+    }
+  | {
+      type: "turn.interrupted";
+      requestId: string;
+      threadId: string;
+      turnId?: string | undefined;
+      clearedQueuedTurns: number;
     }
   | {
       type: "approval.respond";
@@ -216,7 +258,7 @@ export type AppMessage =
   | {
       type: "error";
       requestId?: string;
-      code: string;
+      code: AppErrorCode | string;
       message: string;
     };
 
@@ -265,6 +307,7 @@ export interface ThreadItemSnapshot {
   id: string;
   type: string;
   text?: string | undefined;
+  attachments?: TurnAttachmentSummary[] | undefined;
   command?: string | undefined;
   output?: string | null | undefined;
   diff?: string | undefined;

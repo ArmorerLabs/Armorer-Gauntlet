@@ -4,6 +4,7 @@ import {
   attentionFromStatusTransition,
   normalizeNotification,
   pendingApprovalFromRequest,
+  snapshotThread,
   summarizeThread
 } from "./codex-normalize.js";
 
@@ -94,5 +95,82 @@ describe("codex normalization", () => {
     });
 
     expect(event && attentionFromStatusTransition(event, undefined)).toBeNull();
+  });
+
+  it("normalizes the broader Codex structured item set for mobile", () => {
+    const thread = snapshotThread({
+      id: "abc",
+      cwd: "/repo",
+      updatedAt: 1,
+      createdAt: 1,
+      status: "idle",
+      turns: [
+        {
+          id: "turn-1",
+          status: "completed",
+          items: [
+            { type: "hookPrompt", id: "hook", fragments: [{ text: "Hook says hi", hookRunId: "run-1" }] },
+            {
+              type: "fileChange",
+              id: "files",
+              status: "completed",
+              changes: [{ path: "src/app.ts", kind: { type: "update", move_path: null }, diff: "@@ diff" }]
+            },
+            {
+              type: "mcpToolCall",
+              id: "mcp",
+              server: "github",
+              tool: "create_issue",
+              status: "completed",
+              arguments: {},
+              result: { content: ["ok"], structuredContent: null, _meta: null },
+              error: null
+            },
+            {
+              type: "dynamicToolCall",
+              id: "tool",
+              tool: "browser",
+              status: "completed",
+              arguments: { url: "https://example.com" },
+              contentItems: [{ type: "inputText", text: "Loaded page" }],
+              success: true
+            },
+            { type: "webSearch", id: "search", query: "armorer", action: null },
+            { type: "imageView", id: "image", path: "/tmp/screen.png" },
+            {
+              type: "imageGeneration",
+              id: "generated",
+              status: "completed",
+              revisedPrompt: "A clean app icon",
+              result: "ok",
+              savedPath: "/tmp/icon.png"
+            },
+            { type: "contextCompaction", id: "compact" }
+          ]
+        }
+      ]
+    });
+
+    const items = thread.turns[0]?.items ?? [];
+    expect(items.map((item) => item.type)).toEqual([
+      "hookPrompt",
+      "fileChange",
+      "mcpToolCall",
+      "dynamicToolCall",
+      "webSearch",
+      "imageView",
+      "imageGeneration",
+      "contextCompaction"
+    ]);
+    expect(items.find((item) => item.type === "fileChange")).toMatchObject({
+      text: "update: src/app.ts",
+      diff: "@@ diff"
+    });
+    expect(items.find((item) => item.type === "mcpToolCall")?.text).toContain("github.create_issue");
+    expect(items.find((item) => item.type === "dynamicToolCall")?.text).toContain("Loaded page");
+    expect(items.find((item) => item.type === "imageView")?.attachments?.[0]).toMatchObject({
+      name: "screen.png",
+      kind: "image"
+    });
   });
 });

@@ -30,6 +30,7 @@ export function statusLabel(status: string | undefined): string {
   if (value.includes("approval")) return "Approval";
   if (value.includes("input")) return "Input";
   if (value.includes("active") || value.includes("running")) return "Running";
+  if (value.includes("interrupted")) return "Stopped";
   if (value.includes("failed")) return "Failed";
   if (!value || value === "unknown") return "Idle";
   return titleCase(value.split(":")[0] ?? value);

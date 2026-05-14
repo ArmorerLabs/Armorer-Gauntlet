@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { ClientRequest, InitializeResponse, ServerNotification, ServerRequest } from "@armorer/gauntlet-codex-protocol";
 import { WebSocket } from "ws";
+import { errorMessage, log } from "./logger.js";
 
 export interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -137,7 +138,11 @@ export class CodexAppServer extends EventEmitter<{
       socket.once("error", reject);
     });
     socket.on("message", (raw) => this.handleMessage(raw.toString()));
-    socket.on("close", () => {
+    socket.on("error", (error) => {
+      log.error("codex app-server socket error", errorMessage(error));
+    });
+    socket.on("close", (code, reason) => {
+      log.warn("codex app-server socket closed", { code, reason: reason?.toString(), pendingRequests: this.pending.size });
       for (const pending of this.pending.values()) {
         pending.reject(new Error("Codex app-server socket closed"));
       }

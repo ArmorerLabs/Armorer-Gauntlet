@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { env } from "$env/dynamic/public";
-  import { Plus, RefreshCw, Settings, X } from "lucide-svelte";
+  import { Bell, Plus, RefreshCw, Settings, X } from "lucide-svelte";
   import { onDestroy, onMount, tick } from "svelte";
   import jsQR from "jsqr";
   import {
@@ -17,7 +17,6 @@
   import type { SessionSummary } from "@armorer/gauntlet-shared";
 
   type Filter = "all" | "active" | "completed";
-
   let pairingPayload = "";
   const configuredVapidPublicKey = (env.PUBLIC_VAPID_PUBLIC_KEY ?? "").trim();
   let vapidPublicKey = configuredVapidPublicKey;
@@ -25,6 +24,7 @@
   let pushMessage = "";
   let notificationPermission = "unsupported";
   let notificationPromptDismissed = false;
+  let promptsReady = false;
   let showPasteFallback = false;
   let scannerOpen = false;
   let scannerError = "";
@@ -51,10 +51,15 @@
   $: chosenCwd = (manualCwd.trim() || selectedCwd.trim()).trim();
   $: pushKey = (showPushKeyInput ? vapidPublicKey : configuredVapidPublicKey).trim();
   $: showNotificationPrompt =
+    promptsReady &&
     Boolean(state.peer) &&
+    state.sessions.length > 0 &&
     Boolean(pushKey) &&
     notificationPermission === "default" &&
-    !notificationPromptDismissed;
+    !notificationPromptDismissed &&
+    !showNewSession &&
+    !showSettings &&
+    !scannerOpen;
 
   async function pair() {
     await remoteClient.pair(pairingPayload);
@@ -203,7 +208,15 @@
         : "unsupported";
   }
 
-  onMount(refreshNotificationPermission);
+  onMount(() => {
+    refreshNotificationPermission();
+    const promptTimer = window.setTimeout(() => {
+      promptsReady = true;
+    }, 700);
+    return () => {
+      window.clearTimeout(promptTimer);
+    };
+  });
   onDestroy(closeScanner);
 </script>
 
@@ -304,6 +317,22 @@
       </section>
     {/if}
 
+    {#if showNotificationPrompt}
+      <section class="prompt-card notification-card" aria-label="Enable notifications">
+        <div>
+          <strong>Enable notifications</strong>
+          <span>Get alerts when a session needs approval, input, or is ready for the next instruction.</span>
+        </div>
+        <div>
+          <button class="small-button" on:click={enablePush}>
+            <Bell size={15} strokeWidth={2.4} aria-hidden="true" />
+            Allow
+          </button>
+          <button class="text-button" on:click={() => (notificationPromptDismissed = true)}>Later</button>
+        </div>
+      </section>
+    {/if}
+
     <section class="session-list dense-list" aria-label="Sessions">
       {#if !filteredSessions.length}
         <p class="empty">No sessions match this view.</p>
@@ -360,21 +389,6 @@
     <button class="primary-action" disabled={!chosenCwd || creatingSession} on:click={createSession}>
       {creatingSession ? "Creating..." : "Create session"}
     </button>
-  </div>
-{/if}
-
-{#if showNotificationPrompt}
-  <div class="sheet-backdrop notification-backdrop" role="presentation"></div>
-  <div class="notification-popup" role="dialog" aria-modal="true" aria-label="Enable notifications">
-    <div class="notification-icon" aria-hidden="true">!</div>
-    <div>
-      <h2>Enable notifications</h2>
-      <p>Get a phone alert when Codex needs approval, input, or attention.</p>
-    </div>
-    <div class="notification-actions">
-      <button class="primary-action" on:click={enablePush}>Allow notifications</button>
-      <button class="text-button" on:click={() => (notificationPromptDismissed = true)}>Later</button>
-    </div>
   </div>
 {/if}
 

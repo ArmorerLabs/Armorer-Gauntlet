@@ -11,19 +11,29 @@ import {
 import { randomBytes } from "node:crypto";
 import { CodexAppServer } from "./codex-app-server.js";
 import {
+  asRecord,
   attentionFromApproval,
   attentionFromEvent,
   attentionFromStatusTransition,
   isIdleAttention,
   normalizeNotification,
+  optionalString,
   pendingApprovalFromRequest,
   snapshotThread,
   summarizeThread
 } from "./codex-normalize.js";
 import { assertCodexReady } from "./codex-version.js";
 import { getConfigPath, loadOrCreateConfig, type DaemonConfig } from "./config.js";
+import { initLogger, log } from "./logger.js";
 import { DaemonRelayClient } from "./relay-client.js";
 import { readThreadWithRetry } from "./thread-read.js";
+import {
+  classifyDaemonError,
+  createTurnRuntime,
+  drainQueuedTurns,
+  handleTurnInterrupt,
+  handleTurnStart
+} from "./turns.js";
 
 const program = new Command();
 const IDLE_ATTENTION_DEDUPE_MS = 5_000;
@@ -37,8 +47,22 @@ program
   .option("--app-url <url>", "Mobile PWA URL to encode in the pairing QR")
   .option("--name <name>", "Display name for this dev machine")
   .option("--pair", "Open a new 10-minute mobile pairing window", true)
+  .option("--debug", "Trace relay messages and turn lifecycle (also GAUNTLET_DEBUG=1)")
+  .option("--log-file <path>", "Tee stdout+stderr to a file (also GAUNTLET_LOG_FILE=<path>)")
   .action(
-    async (options: { relay: string; mobileRelay?: string; appUrl?: string; name?: string; pair: boolean }) => {
+    async (options: {
+      relay: string;
+      mobileRelay?: string;
+      appUrl?: string;
+      name?: string;
+      pair: boolean;
+      debug?: boolean;
+      logFile?: string;
+    }) => {
+      initLogger({
+        debug: Boolean(options.debug) || process.env.GAUNTLET_DEBUG === "1",
+        logFile: options.logFile ?? process.env.GAUNTLET_LOG_FILE ?? undefined
+      });
       await startDaemon(options);
     }
   );
@@ -68,11 +92,12 @@ async function startDaemon(options: {
   console.log(codexHealth.loginStatus || "codex login status unavailable");
 
   const appServer = new CodexAppServer();
+  const turnRuntime = createTurnRuntime();
   const relay = new DaemonRelayClient({
     config,
     relayUrl: options.relay,
     onMessage: async (message, fromMobileId) => {
-      await handleMobileMessage(message, fromMobileId, appServer, relay, config);
+      await handleMobileMessage(message, fromMobileId, appServer, relay, config, turnRuntime);
     }
   });
 
@@ -87,7 +112,6 @@ async function startDaemon(options: {
     printPairing(pairing, options.appUrl);
   }
 
-  const threadStatuses = new Map<string, string>();
   const idleAttentionAt = new Map<string, number>();
   const broadcastAttention = async (attention: ReturnType<typeof attentionFromEvent>) => {
     if (!attention) return;
@@ -102,12 +126,29 @@ async function startDaemon(options: {
   };
 
   appServer.on("notification", async (notification) => {
+    log.debug("codex notification", () => ({ method: notification.method }));
+    const startedTurn = activeTurnFromNotification(notification);
+    if (startedTurn) {
+      turnRuntime.activeTurnIds.set(startedTurn.threadId, startedTurn.turnId);
+      turnRuntime.threadStatuses.set(startedTurn.threadId, "active");
+    }
     const event = normalizeNotification(notification);
     if (!event) return;
+    log.debug("relay broadcast", () => ({ event: event.type, threadId: "threadId" in event ? event.threadId : undefined }));
     await relay.broadcast({ type: "codex.event", event }, "event");
     if (event.type === "thread.status") {
-      await broadcastAttention(attentionFromStatusTransition(event, threadStatuses.get(event.threadId)));
-      threadStatuses.set(event.threadId, event.status);
+      await broadcastAttention(attentionFromStatusTransition(event, turnRuntime.threadStatuses.get(event.threadId)));
+      turnRuntime.threadStatuses.set(event.threadId, event.status);
+      if (!event.status.startsWith("active")) {
+        await drainQueuedTurns(appServer, relay, turnRuntime, event.threadId, codexModelOverride());
+      }
+    }
+    if (event.type === "turn.completed") {
+      if (turnRuntime.activeTurnIds.get(event.threadId) === event.turnId) {
+        turnRuntime.activeTurnIds.delete(event.threadId);
+      }
+      turnRuntime.threadStatuses.set(event.threadId, "idle");
+      await drainQueuedTurns(appServer, relay, turnRuntime, event.threadId, codexModelOverride());
     }
     await broadcastAttention(attentionFromEvent(event));
   });
@@ -144,8 +185,15 @@ async function handleMobileMessage(
   fromMobileId: string,
   appServer: CodexAppServer,
   relay: DaemonRelayClient,
-  config: DaemonConfig
+  config: DaemonConfig,
+  turnRuntime: ReturnType<typeof createTurnRuntime>
 ): Promise<void> {
+  log.debug("mobile message", () => ({
+    type: message.type,
+    fromMobileId,
+    threadId: "threadId" in message ? message.threadId : undefined,
+    requestId: "requestId" in message ? message.requestId : undefined
+  }));
   try {
     switch (message.type) {
       case "sessions.list": {
@@ -154,20 +202,26 @@ async function handleMobileMessage(
           limit: 50,
           sortKey: "updated_at"
         })) as { data?: unknown[] };
+        const sessions = (response.data ?? []).map(summarizeThread);
+        for (const session of sessions) {
+          turnRuntime.threadStatuses.set(session.id, session.status);
+        }
         await relay.sendToMobile(fromMobileId, {
           type: "sessions.snapshot",
           requestId: message.requestId,
-          sessions: (response.data ?? []).map(summarizeThread),
+          sessions,
           daemon: daemonSummary(config)
         });
         return;
       }
       case "thread.read": {
         const response = await readThreadWithRetry(appServer, message.threadId);
+        const thread = snapshotThread(response.thread);
+        turnRuntime.threadStatuses.set(thread.id, thread.status);
         await relay.sendToMobile(fromMobileId, {
           type: "thread.snapshot",
           requestId: message.requestId,
-          thread: snapshotThread(response.thread)
+          thread
         });
         return;
       }
@@ -189,47 +243,38 @@ async function handleMobileMessage(
         });
         const initialMessage = message.initialMessage?.trim();
         if (initialMessage) {
-          const turnResponse = (await appServer.request("turn/start", {
-            threadId: session.id,
-            ...(model ? { model } : {}),
-            input: [
-              {
-                type: "text",
-                text: initialMessage,
-                text_elements: []
-              }
-            ]
-          })) as { turn?: { id?: string } };
-          await relay.sendToMobile(fromMobileId, {
-            type: "turn.accepted",
+          await handleTurnStart(appServer, relay, turnRuntime, {
+            fromMobileId,
             requestId: message.requestId,
             threadId: session.id,
-            turnId: turnResponse.turn?.id
+            text: initialMessage,
+            attachments: [],
+            mode: "next",
+            ...(model ? { model } : {})
           });
         }
         return;
       }
       case "turn.start": {
         const model = codexModelOverride();
-        const response = (await appServer.request("turn/start", {
-          threadId: message.threadId,
-          ...(model ? { model } : {}),
-          input: [
-            {
-              type: "text",
-              text: message.text,
-              text_elements: []
-            }
-          ]
-        })) as { turn?: { id?: string } };
-        await relay.sendToMobile(fromMobileId, {
-          type: "turn.accepted",
+        await handleTurnStart(appServer, relay, turnRuntime, {
+          fromMobileId,
           requestId: message.requestId,
           threadId: message.threadId,
-          turnId: response.turn?.id
+          text: message.text,
+          attachments: message.attachments ?? [],
+          mode: message.mode ?? "next",
+          ...(model ? { model } : {})
         });
         return;
       }
+      case "turn.interrupt":
+        await handleTurnInterrupt(appServer, relay, turnRuntime, {
+          fromMobileId,
+          requestId: message.requestId,
+          threadId: message.threadId
+        });
+        return;
       case "approval.respond":
         appServer.respond(message.codexRequestId, message.response);
         await relay.sendToMobile(fromMobileId, {
@@ -249,6 +294,8 @@ async function handleMobileMessage(
       case "daemon.status":
       case "thread.snapshot":
       case "turn.accepted":
+      case "turn.queued":
+      case "turn.interrupted":
       case "session.created":
       case "codex.event":
       case "attention":
@@ -261,11 +308,13 @@ async function handleMobileMessage(
     }
   } catch (error) {
     const requestId = "requestId" in message ? message.requestId : undefined;
+    const classified = classifyDaemonError(error);
+    log.warn("mobile message failed", { type: message.type, code: classified.code, message: classified.message });
     await relay.sendToMobile(fromMobileId, {
       type: "error",
       ...(requestId ? { requestId } : {}),
-      code: "daemon_request_failed",
-      message: error instanceof Error ? error.message : "Unknown daemon error"
+      code: classified.code,
+      message: classified.message
     });
   }
 }
@@ -324,4 +373,13 @@ function createPairingUrl(appUrl: string, payload: string): string {
 
 function createPairingToken(): string {
   return `p_${randomBytes(12).toString("base64url")}`;
+}
+
+function activeTurnFromNotification(notification: { method: string; params?: unknown }): { threadId: string; turnId: string } | null {
+  if (notification.method !== "turn/started") return null;
+  const params = asRecord(notification.params);
+  const turn = asRecord(params.turn);
+  const threadId = optionalString(params.threadId);
+  const turnId = optionalString(turn.id);
+  return threadId && turnId ? { threadId, turnId } : null;
 }

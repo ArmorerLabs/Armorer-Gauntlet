@@ -1,3 +1,5 @@
+import { renderDirectiveLine } from "./directives.js";
+
 const INLINE_CODE_PLACEHOLDER = "\u0000CODE";
 
 export function renderMarkdown(markdown: string): string {
@@ -54,6 +56,13 @@ export function renderMarkdown(markdown: string): string {
       continue;
     }
 
+    const directiveHtml = renderDirectiveLine(line.trim());
+    if (directiveHtml) {
+      flushOpenBlocks();
+      blocks.push(directiveHtml);
+      continue;
+    }
+
     const heading = line.match(/^(#{1,3})\s+(.+)$/);
     if (heading) {
       flushOpenBlocks();
@@ -99,6 +108,35 @@ export function renderMarkdown(markdown: string): string {
   }
   flushOpenBlocks();
 
+  return blocks.join("");
+}
+
+export function renderPlainTextWithDirectives(text: string): string {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const blocks: string[] = [];
+  let paragraph: string[] = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(`<p>${paragraph.map(escapeHtml).join("<br>")}</p>`);
+    paragraph = [];
+  };
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+    const directiveHtml = renderDirectiveLine(line.trim());
+    if (directiveHtml) {
+      flushParagraph();
+      blocks.push(directiveHtml);
+      continue;
+    }
+    paragraph.push(line);
+  }
+
+  flushParagraph();
   return blocks.join("");
 }
 
