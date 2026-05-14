@@ -2,6 +2,7 @@
   "name": "@armorer/gauntlet-relay",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "armorer-gauntlet-relay": "./dist/index.js"

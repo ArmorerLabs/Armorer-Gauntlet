@@ -2,6 +2,7 @@
   "name": "@armorer/gauntlet-daemon",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "armorer-gauntlet-daemon": "./dist/index.js"

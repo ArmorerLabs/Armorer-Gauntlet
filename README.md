@@ -9,8 +9,9 @@ Local-first by default. Self-hosted relay. End-to-end encrypted app messages. No
 ![TypeScript](https://img.shields.io/badge/typescript-ready-3178c6)
 ![Mobile](https://img.shields.io/badge/mobile-PWA-18c289)
 ![E2EE](https://img.shields.io/badge/messages-E2EE-111827)
+![License](https://img.shields.io/badge/license-Apache--2.0-3178c6)
 
-[Self-hosting](docs/self-host.md) · [Protocol](docs/protocol.md) · [Development](docs/development.md) · [Security](SECURITY.md)
+[Self-hosting](docs/self-host.md) · [Protocol](docs/protocol.md) · [Development](docs/development.md) · [Security](SECURITY.md) · [License](LICENSE)
 
 ---
 
@@ -162,7 +163,7 @@ npm run test:e2e
 - `.env` contains generated VAPID private keys and is intentionally ignored.
 - The daemon stores local identity and paired phone keys under `~/.armorer-gauntlet/daemon.json`.
 - The relay must be served over HTTPS/WSS for camera scanning, service workers, and push notifications on real phones.
-- No license has been selected yet. Add a `LICENSE` before presenting this as open source.
+- Armorer Gauntlet is released under the Apache License 2.0. Workspace packages remain marked private because this repository is not publishing npm packages yet.
 
 ## Docs
 

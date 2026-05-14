@@ -1,8 +1,18 @@
 {
   "name": "armorer-gauntlet",
   "version": "0.1.0",
+  "description": "Put your coding agents in your pocket: a mobile control plane for local agent sessions.",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArmorerLabs/Armorer-Gauntlet.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ArmorerLabs/Armorer-Gauntlet/issues"
+  },
+  "homepage": "https://github.com/ArmorerLabs/Armorer-Gauntlet#readme",
   "engines": {
     "node": ">=20",
     "npm": ">=10"
