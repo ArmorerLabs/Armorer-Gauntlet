@@ -1,0 +1,9 @@
+:8080 {
+	handle /relay* {
+		reverse_proxy relay:8787
+	}
+
+	handle {
+		reverse_proxy pwa:3000
+	}
+}

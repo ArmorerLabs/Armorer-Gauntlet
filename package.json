@@ -1,0 +1,45 @@
+{
+  "name": "armorer-gauntlet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20",
+    "npm": ">=10"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run build -w @armorer/gauntlet-codex-protocol -w @armorer/gauntlet-shared && npm run check --workspaces --if-present",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "dev:relay": "npm run dev -w @armorer/gauntlet-relay",
+    "dev:daemon": "npm run dev -w @armorer/gauntlet-daemon",
+    "dev:pwa": "npm run dev -w @armorer/gauntlet-pwa",
+    "generate:codex-protocol": "codex app-server generate-ts --experimental --out packages/codex-protocol/src/generated"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@sveltejs/adapter-node": "^5.2.13",
+    "@sveltejs/kit": "^2.27.0",
+    "@sveltejs/vite-plugin-svelte": "^5.1.1",
+    "@types/node": "^22.15.3",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.18.1",
+    "svelte": "^5.36.14",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "qrcode-terminal": "^0.12.0",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.2"
+  }
+}

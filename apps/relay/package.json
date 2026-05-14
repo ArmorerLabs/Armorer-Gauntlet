@@ -1,0 +1,23 @@
+{
+  "name": "@armorer/gauntlet-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "armorer-gauntlet-relay": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@armorer/gauntlet-shared": "0.1.0",
+    "commander": "^13.1.0",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4"
+  }
+}

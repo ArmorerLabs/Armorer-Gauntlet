@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Armorer Gauntlet">
+  <rect width="512" height="512" rx="96" fill="#09090b"/>
+  <path d="M256 72 396 136v104c0 84-51 150-140 190-89-40-140-106-140-190V136L256 72Z" fill="#052e24" stroke="#065f46" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M172 218c0-21 17-38 38-38h90c28 0 50 22 50 50v30c0 49-40 89-89 89h-21c-38 0-68-30-68-68v-63Z" fill="#064e3b" stroke="#10b981" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M205 180v90M239 180v90M273 180v90M307 192v78" stroke="#34d399" stroke-width="16" stroke-linecap="round"/>
+  <path d="M191 330h125v54c0 16-13 29-29 29h-67c-16 0-29-13-29-29v-54Z" fill="#18181b" stroke="#10b981" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M222 231h81" stroke="#fafafa" stroke-width="18" stroke-linecap="round"/>
+</svg>

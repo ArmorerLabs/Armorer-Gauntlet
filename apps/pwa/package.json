@@ -1,0 +1,22 @@
+{
+  "name": "@armorer/gauntlet-pwa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "svelte-kit sync && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@armorer/gauntlet-shared": "0.1.0",
+    "@sveltejs/adapter-node": "^5.2.13",
+    "@sveltejs/kit": "^2.27.0",
+    "@sveltejs/vite-plugin-svelte": "^5.1.1",
+    "jsqr": "^1.4.0",
+    "lucide-svelte": "^1.0.1",
+    "svelte": "^5.36.14",
+    "vite": "^6.3.5"
+  }
+}

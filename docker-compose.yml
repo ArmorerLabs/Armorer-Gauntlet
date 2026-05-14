@@ -1,0 +1,66 @@
+services:
+  relay:
+    build:
+      context: .
+      target: relay
+    env_file:
+      - .env
+    command:
+      - node
+      - apps/relay/dist/index.js
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
+      - --vapid-subject
+      - ${VAPID_SUBJECT:-mailto:you@example.com}
+      - --vapid-public-key
+      - ${VAPID_PUBLIC_KEY:-}
+      - --vapid-private-key
+      - ${VAPID_PRIVATE_KEY:-}
+    ports:
+      - "${RELAY_PORT:-8787}:8787"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  pwa:
+    build:
+      context: .
+      target: pwa
+      args:
+        PUBLIC_VAPID_PUBLIC_KEY: ${PUBLIC_VAPID_PUBLIC_KEY:-}
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      ORIGIN: http://127.0.0.1:${FRONT_DOOR_PORT:-8080}
+    ports:
+      - "${PWA_PORT:-3000}:3000"
+    depends_on:
+      relay:
+        condition: service_healthy
+
+  front-door:
+    image: caddy:2-alpine
+    ports:
+      - "${FRONT_DOOR_PORT:-8080}:8080"
+    volumes:
+      - ./ops/Caddyfile.local:/etc/caddy/Caddyfile:ro
+    depends_on:
+      relay:
+        condition: service_healthy
+      pwa:
+        condition: service_started
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles:
+      - tunnel
+    command: tunnel --url http://front-door:8080 --no-autoupdate
+    depends_on:
+      front-door:
+        condition: service_started
