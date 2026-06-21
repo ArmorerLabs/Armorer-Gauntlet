@@ -19,6 +19,7 @@ export function summarizeThread(thread: unknown): SessionSummary {
   const id = stringField(data, "id");
   return {
     id,
+    agent: "codex",
     name: optionalString(data.name) ?? firstLine(optionalString(data.preview) ?? id),
     preview: optionalString(data.preview) ?? "",
     cwd: optionalString(data.cwd) ?? "",

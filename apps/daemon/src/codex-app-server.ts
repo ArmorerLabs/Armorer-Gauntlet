@@ -4,6 +4,8 @@ import type { ClientRequest, InitializeResponse, ServerNotification, ServerReque
 import { WebSocket } from "ws";
 import { errorMessage, log } from "./logger.js";
 
+const DEFAULT_MAX_CODEX_APP_SERVER_PAYLOAD_BYTES = 512 * 1024 * 1024;
+
 export interface JsonRpcRequest {
   jsonrpc: "2.0";
   id: number | string;
@@ -131,7 +133,9 @@ export class CodexAppServer extends EventEmitter<{
   }
 
   private async connect(url: string): Promise<void> {
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(url, {
+      maxPayload: Number(process.env.GAUNTLET_CODEX_MAX_PAYLOAD_BYTES ?? DEFAULT_MAX_CODEX_APP_SERVER_PAYLOAD_BYTES)
+    });
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
       socket.once("open", resolve);

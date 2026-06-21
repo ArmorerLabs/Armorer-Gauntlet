@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.0
+
+Minor provider and mobile-operations release.
+
+Daemon
+
+- Added first-class Claude Code sessions that can be created, listed, read, started, and interrupted from Gauntlet.
+- Added first-class Pi coding-agent sessions alongside Codex sessions.
+- Increased the Codex app-server WebSocket payload ceiling to handle large thread snapshots.
+- Added setup checks and environment knobs for Pi and Claude Code adapters.
+
+PWA
+
+- Added agent filters and badges for Codex, Pi, and Claude.
+- Added a Working feed filter and pulsing indicator for sessions that are actively running, queued, starting, sending, or accepted.
+- Added Claude and Pi choices to the new-session sheet.
+
+Tooling
+
+- Added adapter unit coverage for Pi and Claude session lifecycles.
+- Added display helper coverage for working-state and agent labels.
+
 ## v0.2.0
 
 Quality and observability pass on top of the v0.1.0 release.

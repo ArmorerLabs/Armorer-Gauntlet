@@ -5,18 +5,22 @@
   import { onDestroy, onMount, tick } from "svelte";
   import jsQR from "jsqr";
   import {
+    agentLabel,
+    agentTone,
     compactPath,
     displayTitle,
     isCompleted,
+    isWorking,
     needsAttention,
     relativeTime,
     statusLabel,
     workspaceName
   } from "$lib/display";
   import { remoteClient, remoteState } from "$lib/remote";
-  import type { SessionSummary } from "@armorer/gauntlet-shared";
+  import type { AgentKind, SessionSummary } from "@armorer/gauntlet-shared";
 
-  type Filter = "all" | "active" | "completed";
+  type Filter = "all" | "working" | "active" | "completed";
+  type AgentFilter = "all" | AgentKind;
   let pairingPayload = "";
   const configuredVapidPublicKey = (env.PUBLIC_VAPID_PUBLIC_KEY ?? "").trim();
   let vapidPublicKey = configuredVapidPublicKey;
@@ -30,12 +34,14 @@
   let scannerError = "";
   let scanning = false;
   let activeFilter: Filter = "all";
+  let activeAgentFilter: AgentFilter = "all";
   let searchQuery = "";
   let showNewSession = false;
   let showSettings = false;
   let selectedCwd = "";
   let manualCwd = "";
   let initialMessage = "";
+  let newSessionAgent: AgentKind = "codex";
   let creatingSession = false;
   let createError = "";
   let videoEl: HTMLVideoElement;
@@ -44,9 +50,13 @@
   let animationFrame: number | undefined;
 
   $: state = $remoteState;
+  $: codexSessions = state.sessions.filter((session) => (session.agent ?? "codex") === "codex");
+  $: piSessions = state.sessions.filter((session) => session.agent === "pi");
+  $: claudeSessions = state.sessions.filter((session) => session.agent === "claude");
+  $: workingSessions = state.sessions.filter((session) => isWorking(session.status));
   $: activeSessions = state.sessions.filter((session) => !isCompleted(session.status));
   $: completedSessions = state.sessions.filter((session) => isCompleted(session.status));
-  $: filteredSessions = filterSessions(state.sessions, activeFilter, searchQuery);
+  $: filteredSessions = filterSessions(state.sessions, activeFilter, activeAgentFilter, searchQuery);
   $: workspaceOptions = recentWorkspaces(state.sessions);
   $: chosenCwd = (manualCwd.trim() || selectedCwd.trim()).trim();
   $: pushKey = (showPushKeyInput ? vapidPublicKey : configuredVapidPublicKey).trim();
@@ -133,6 +143,7 @@
     selectedCwd = workspaceOptions[0] ?? "";
     manualCwd = "";
     initialMessage = "";
+    newSessionAgent = activeAgentFilter === "pi" || activeAgentFilter === "claude" ? activeAgentFilter : "codex";
     createError = "";
     showNewSession = true;
   }
@@ -142,7 +153,7 @@
     creatingSession = true;
     createError = "";
     try {
-      const session = await remoteClient.createSession(chosenCwd, initialMessage);
+      const session = await remoteClient.createSession(chosenCwd, initialMessage, newSessionAgent);
       showNewSession = false;
       await goto(`/sessions/${session.id}`);
     } catch (error) {
@@ -175,13 +186,15 @@
     }
   }
 
-  function filterSessions(sessions: SessionSummary[], filter: Filter, query: string): SessionSummary[] {
+  function filterSessions(sessions: SessionSummary[], filter: Filter, agentFilter: AgentFilter, query: string): SessionSummary[] {
     const needle = query.trim().toLowerCase();
     return sessions.filter((session) => {
+      if (agentFilter !== "all" && (session.agent ?? "codex") !== agentFilter) return false;
+      if (filter === "working" && !isWorking(session.status)) return false;
       if (filter === "active" && isCompleted(session.status)) return false;
       if (filter === "completed" && !isCompleted(session.status)) return false;
       if (!needle) return true;
-      return [displayTitle(session), session.preview, session.cwd, session.status]
+      return [agentLabel(session), displayTitle(session), session.preview, session.cwd, session.status]
         .join(" ")
         .toLowerCase()
         .includes(needle);
@@ -293,12 +306,29 @@
   {:else}
     <section class="inbox-controls">
       <input bind:value={searchQuery} class="search-input" type="search" placeholder="Search sessions or paths" />
+      <div class="agent-tabs" aria-label="Agent filter">
+        <button class:active={activeAgentFilter === "all"} on:click={() => (activeAgentFilter = "all")}>
+          All agents <span>{state.sessions.length}</span>
+        </button>
+        <button class:active={activeAgentFilter === "codex"} on:click={() => (activeAgentFilter = "codex")}>
+          Codex <span>{codexSessions.length}</span>
+        </button>
+        <button class:active={activeAgentFilter === "pi"} on:click={() => (activeAgentFilter = "pi")}>
+          Pi <span>{piSessions.length}</span>
+        </button>
+        <button class:active={activeAgentFilter === "claude"} on:click={() => (activeAgentFilter = "claude")}>
+          Claude <span>{claudeSessions.length}</span>
+        </button>
+      </div>
       <div class="filter-tabs" aria-label="Session filter">
         <button class:active={activeFilter === "all"} on:click={() => (activeFilter = "all")}>
           All <span>{state.sessions.length}</span>
         </button>
+        <button class:active={activeFilter === "working"} on:click={() => (activeFilter = "working")}>
+          Working <span>{workingSessions.length}</span>
+        </button>
         <button class:active={activeFilter === "active"} on:click={() => (activeFilter = "active")}>
-          Active <span>{activeSessions.length}</span>
+          Open <span>{activeSessions.length}</span>
         </button>
         <button class:active={activeFilter === "completed"} on:click={() => (activeFilter = "completed")}>
           Done <span>{completedSessions.length}</span>
@@ -338,17 +368,26 @@
         <p class="empty">No sessions match this view.</p>
       {/if}
       {#each filteredSessions as session}
-        <a class="session-card dense" class:attention={needsAttention(session.status)} href={`/sessions/${session.id}`}>
+        <a
+          class="session-card dense"
+          class:attention={needsAttention(session.status)}
+          class:working={isWorking(session.status)}
+          href={`/sessions/${session.id}`}
+        >
           <div class="session-main">
             <div class="session-title-row">
+              <span class:pi={agentTone(session) === "pi"} class:claude={agentTone(session) === "claude"} class="agent-badge">{agentLabel(session)}</span>
+              {#if isWorking(session.status)}
+                <span class="working-dot" aria-label="Currently working"></span>
+              {/if}
               <strong>{displayTitle(session)}</strong>
               {#if needsAttention(session.status)}
                 <span class="attention-dot" aria-label="Needs attention"></span>
               {/if}
             </div>
-            <span>{workspaceName(session.cwd) || session.source} · {compactPath(session.cwd, 32)}</span>
+            <span>{workspaceName(session.cwd) || session.source} · {session.modelProvider} · {compactPath(session.cwd, 32)}</span>
           </div>
-          <span class="status-chip">{statusLabel(session.status)}</span>
+          <span class="status-chip" class:working={isWorking(session.status)}>{statusLabel(session.status)}</span>
           <time>{relativeTime(session.updatedAt)}</time>
         </a>
       {/each}
@@ -365,6 +404,11 @@
         <X size={23} strokeWidth={2.5} aria-hidden="true" />
       </button>
     </header>
+    <div class="agent-choice" aria-label="Agent for new session">
+      <button class:active={newSessionAgent === "codex"} on:click={() => (newSessionAgent = "codex")}>Codex</button>
+      <button class:active={newSessionAgent === "pi"} on:click={() => (newSessionAgent = "pi")}>Pi</button>
+      <button class:active={newSessionAgent === "claude"} on:click={() => (newSessionAgent = "claude")}>Claude</button>
+    </div>
     {#if workspaceOptions.length}
       <div class="workspace-list" aria-label="Recent workspaces">
         {#each workspaceOptions as cwd}
@@ -381,7 +425,7 @@
     </label>
     <label class="field-stack">
       <span>First message</span>
-      <textarea bind:value={initialMessage} rows="4" placeholder="Ask Codex to start work..."></textarea>
+      <textarea bind:value={initialMessage} rows="4" placeholder={`Ask ${agentLabel({ agent: newSessionAgent })} to start work...`}></textarea>
     </label>
     {#if createError}
       <p class="inline-error">{createError}</p>

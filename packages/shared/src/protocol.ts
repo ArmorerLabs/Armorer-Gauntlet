@@ -22,6 +22,7 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 export type TurnMode = "next" | "steer";
+export type AgentKind = "codex" | "pi" | "claude";
 export type AppErrorCode = "thread_not_found" | "thread_busy" | "thread_preparing" | "daemon_request_failed";
 export type TurnAttachmentKind = "image" | "text";
 export type TurnAttachmentEncoding = "base64" | "utf8";
@@ -189,6 +190,7 @@ export type AppMessage =
       type: "session.create";
       requestId: string;
       cwd: string;
+      agent?: AgentKind | undefined;
       initialMessage?: string | undefined;
     }
   | {
@@ -273,6 +275,7 @@ export interface DaemonSummary {
 
 export interface SessionSummary {
   id: string;
+  agent?: AgentKind | undefined;
   name: string;
   preview: string;
   cwd: string;
@@ -286,6 +289,7 @@ export interface SessionSummary {
 
 export interface CodexThreadSnapshot {
   id: string;
+  agent?: AgentKind | undefined;
   name: string;
   preview: string;
   cwd: string;

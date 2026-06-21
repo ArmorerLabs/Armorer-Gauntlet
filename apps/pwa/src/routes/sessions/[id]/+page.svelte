@@ -5,7 +5,7 @@
   import { ArrowDown, ArrowLeft, ArrowUp, CircleStop, Paperclip, RefreshCw, X, Zap } from "lucide-svelte";
   import { unwrapNestedErrorMessage, type TurnAttachment, type TurnAttachmentSummary } from "@armorer/gauntlet-shared";
   import { fileToTurnAttachment, formatAttachmentSize } from "$lib/attachments";
-  import { compactPath, displaySubtitle, displayTitle, relativeTime, statusLabel } from "$lib/display";
+  import { agentLabel, agentTone, compactPath, displaySubtitle, displayTitle, relativeTime, statusLabel } from "$lib/display";
   import { renderMarkdown, renderPlainTextWithDirectives } from "$lib/markdown";
   import { remoteClient, remoteState } from "$lib/remote";
 
@@ -42,6 +42,9 @@
   $: thread = state.threads[threadId];
   $: threadError = state.threadErrors[threadId];
   $: pendingTurn = state.pendingTurns[threadId];
+  $: currentAgent = thread?.agent ?? (threadId.startsWith("pi:") ? "pi" : threadId.startsWith("claude:") ? "claude" : "codex");
+  $: isExternalAgentThread = currentAgent === "pi" || currentAgent === "claude";
+  $: supportsAttachments = !isExternalAgentThread;
   $: sending = pendingTurn?.status === "sending";
   $: turnInFlight =
     pendingTurn?.status === "sending" ||
@@ -50,8 +53,14 @@
     pendingTurn?.status === "running";
   $: threadActive = Boolean(thread?.status && (thread.status === "active" || thread.status.startsWith("active:") || thread.status === "starting"));
   $: canInterrupt = Boolean((threadActive || turnInFlight) && !interrupting && threadError?.code !== "thread_not_found");
-  $: canSubmit = Boolean((draft.trim() || attachments.length) && !sending && threadError?.code !== "thread_not_found");
-  $: canSteer = Boolean(canSubmit && threadActive);
+  $: canSubmit = Boolean(
+    (draft.trim() || (supportsAttachments && attachments.length)) && !sending && threadError?.code !== "thread_not_found"
+  );
+  $: canSteer = Boolean(canSubmit && threadActive && !isExternalAgentThread);
+  $: if (!supportsAttachments && attachments.length) {
+    attachments = [];
+    attachmentError = "";
+  }
   $: pending = state.attentions.filter(
     (item) => item.pendingApproval && (item.threadId === threadId || !item.threadId)
   );
@@ -91,7 +100,8 @@
   async function send(mode: "next" | "steer" = "next") {
     const text = draft.trim();
     if ((!text && !attachments.length) || sending) return;
-    const outgoingAttachments = attachments;
+    const outgoingAttachments = supportsAttachments ? attachments : [];
+    if (!text && !outgoingAttachments.length) return;
     draft = "";
     attachments = [];
     sendError = "";
@@ -158,6 +168,7 @@
   }
 
   function labelFor(type: string): string {
+    if (type === "agentMessage") return agentLabel(thread);
     return ITEM_LABELS[type] ?? type;
   }
 
@@ -210,7 +221,7 @@
       <ArrowLeft size={29} strokeWidth={2.4} aria-hidden="true" />
     </a>
     <div>
-      <strong>{displayTitle(thread)}</strong>
+      <strong><span class:pi={agentTone(thread) === "pi"} class:claude={agentTone(thread) === "claude"} class="agent-badge inline">{agentLabel(thread)}</span>{displayTitle(thread)}</strong>
       <span>{displaySubtitle(thread) || "Armorer Gauntlet"}</span>
     </div>
     <button class="icon-button bordered" aria-label="Refresh thread" title="Refresh thread" on:click={() => remoteClient.readThread(threadId)}>
@@ -319,7 +330,7 @@
         <div class="turn-state" class:error={pendingTurn.status === "failed"}>
           {#if pendingTurn.status === "failed"}
             <span>Failed</span>
-            <strong>{pendingTurn.error ?? "Codex could not handle the turn."}</strong>
+            <strong>{pendingTurn.error ?? `${agentLabel(thread)} could not handle the turn.`}</strong>
           {:else if pendingTurn.status === "queued"}
             <span>queued</span>
             <strong>Queued as the next instruction.</strong>
@@ -328,7 +339,7 @@
             <strong>{pendingTurn.error ?? "Stopped."}</strong>
           {:else}
             <span class="thinking-dot" aria-hidden="true"></span>
-            <strong>Codex is thinking...</strong>
+            <strong>{agentLabel(thread)} is thinking...</strong>
           {/if}
         </div>
       {/if}
@@ -360,25 +371,29 @@
     {/if}
     <textarea
       bind:value={draft}
-      aria-label="Message Codex"
-      placeholder="Message Codex..."
+      aria-label={`Message ${agentLabel(thread)}`}
+      placeholder={`Message ${agentLabel(thread)}...`}
       rows="2"
       enterkeyhint="send"
       disabled={threadError?.code === "thread_not_found"}
       on:keydown={handleComposerKeydown}
     ></textarea>
-    <input
-      bind:this={fileInput}
-      class="visually-hidden"
-      type="file"
-      multiple
-      accept="image/*,text/*,.md,.txt,.json,.ts,.tsx,.js,.jsx,.svelte,.css,.html,.xml,.yaml,.yml,.toml,.py,.rs,.go,.sh,.log,.csv"
-      on:change={attachFiles}
-    />
+    {#if supportsAttachments}
+      <input
+        bind:this={fileInput}
+        class="visually-hidden"
+        type="file"
+        multiple
+        accept="image/*,text/*,.md,.txt,.json,.ts,.tsx,.js,.jsx,.svelte,.css,.html,.xml,.yaml,.yml,.toml,.py,.rs,.go,.sh,.log,.csv"
+        on:change={attachFiles}
+      />
+    {/if}
     <div class="composer-actions">
-      <button type="button" class="icon-button bordered" aria-label="Attach file" title="Attach file" on:click={() => fileInput.click()}>
-        <Paperclip size={22} strokeWidth={2.5} aria-hidden="true" />
-      </button>
+      {#if supportsAttachments}
+        <button type="button" class="icon-button bordered" aria-label="Attach file" title="Attach file" on:click={() => fileInput.click()}>
+          <Paperclip size={22} strokeWidth={2.5} aria-hidden="true" />
+        </button>
+      {/if}
       <button type="button" class="icon-button bordered" aria-label="Scroll to latest" title="Scroll to latest" on:click={() => scrollLatest()}>
         <ArrowDown size={24} strokeWidth={2.5} aria-hidden="true" />
       </button>
@@ -387,7 +402,7 @@
           <CircleStop size={22} strokeWidth={2.5} aria-hidden="true" />
         </button>
       {/if}
-      <span class="mode-chip">{turnInFlight ? statusLabel(pendingTurn?.status) : "Codex"}</span>
+      <span class="mode-chip">{turnInFlight ? statusLabel(pendingTurn?.status) : agentLabel(thread)}</span>
       {#if canSteer}
         <button type="button" class="icon-button bordered" aria-label="Force steer" title="Force steer" on:click={() => send("steer")}>
           <Zap size={21} strokeWidth={2.5} aria-hidden="true" />

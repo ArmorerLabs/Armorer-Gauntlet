@@ -1,6 +1,23 @@
-import type { CodexThreadSnapshot, SessionSummary } from "@armorer/gauntlet-shared";
+import type { AgentKind, CodexThreadSnapshot, SessionSummary } from "@armorer/gauntlet-shared";
 
-type SessionLike = Pick<SessionSummary | CodexThreadSnapshot, "name" | "preview" | "cwd" | "status" | "updatedAt">;
+type SessionLike = Pick<SessionSummary | CodexThreadSnapshot, "name" | "preview" | "cwd" | "status" | "updatedAt"> & { agent?: AgentKind | undefined };
+
+export function agentKind(session: { agent?: AgentKind | undefined } | undefined): AgentKind {
+  if (session?.agent === "pi") return "pi";
+  if (session?.agent === "claude") return "claude";
+  return "codex";
+}
+
+export function agentLabel(session: { agent?: AgentKind | undefined } | undefined): string {
+  const kind = agentKind(session);
+  if (kind === "pi") return "Pi";
+  if (kind === "claude") return "Claude";
+  return "Codex";
+}
+
+export function agentTone(session: { agent?: AgentKind | undefined } | undefined): string {
+  return agentKind(session);
+}
 
 export function displayTitle(session: SessionLike | undefined): string {
   if (!session) return "Session";
@@ -29,11 +46,22 @@ export function statusLabel(status: string | undefined): string {
   if (value.includes("completed")) return "Done";
   if (value.includes("approval")) return "Approval";
   if (value.includes("input")) return "Input";
-  if (value.includes("active") || value.includes("running")) return "Running";
+  if (value.includes("queued")) return "Queued";
+  if (value.includes("active") || value.includes("running") || value.includes("starting") || value.includes("sending") || value.includes("accepted")) {
+    return "Working";
+  }
   if (value.includes("interrupted")) return "Stopped";
   if (value.includes("failed")) return "Failed";
   if (!value || value === "unknown") return "Idle";
   return titleCase(value.split(":")[0] ?? value);
+}
+
+export function isWorking(status: string | undefined): boolean {
+  const value = (status ?? "").toLowerCase();
+  if (!value || value === "unknown") return false;
+  if (value.includes("completed") || value.includes("interrupted") || value.includes("failed")) return false;
+  if (value.includes("approval") || value.includes("input")) return false;
+  return ["active", "running", "starting", "sending", "queued", "accepted"].some((state) => value.includes(state));
 }
 
 export function isCompleted(status: string | undefined): boolean {

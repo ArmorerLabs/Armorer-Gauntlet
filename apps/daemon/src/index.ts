@@ -23,8 +23,24 @@ import {
   summarizeThread
 } from "./codex-normalize.js";
 import { assertCodexReady } from "./codex-version.js";
+import {
+  createClaudeSession,
+  interruptClaudeTurn,
+  isClaudeThreadId,
+  listClaudeSessions,
+  readClaudeThread,
+  startClaudeTurn
+} from "./claude-sessions.js";
 import { getConfigPath, loadOrCreateConfig, type DaemonConfig } from "./config.js";
 import { initLogger, log } from "./logger.js";
+import {
+  createPiSession,
+  interruptPiTurn,
+  isPiThreadId,
+  listPiSessions,
+  readPiThread,
+  startPiTurn
+} from "./pi-sessions.js";
 import { DaemonRelayClient } from "./relay-client.js";
 import { readThreadWithRetry } from "./thread-read.js";
 import {
@@ -202,7 +218,9 @@ async function handleMobileMessage(
           limit: 50,
           sortKey: "updated_at"
         })) as { data?: unknown[] };
-        const sessions = (response.data ?? []).map(summarizeThread);
+        const codexSessions = (response.data ?? []).map(summarizeThread);
+        const [piSessions, claudeSessions] = await Promise.all([listPiSessions(), listClaudeSessions()]);
+        const sessions = [...codexSessions, ...piSessions, ...claudeSessions].sort((left, right) => right.updatedAt - left.updatedAt);
         for (const session of sessions) {
           turnRuntime.threadStatuses.set(session.id, session.status);
         }
@@ -215,8 +233,11 @@ async function handleMobileMessage(
         return;
       }
       case "thread.read": {
-        const response = await readThreadWithRetry(appServer, message.threadId);
-        const thread = snapshotThread(response.thread);
+        const thread = isPiThreadId(message.threadId)
+          ? await readPiThread(message.threadId)
+          : isClaudeThreadId(message.threadId)
+            ? await readClaudeThread(message.threadId)
+            : snapshotThread((await readThreadWithRetry(appServer, message.threadId)).thread);
         turnRuntime.threadStatuses.set(thread.id, thread.status);
         await relay.sendToMobile(fromMobileId, {
           type: "thread.snapshot",
@@ -226,6 +247,42 @@ async function handleMobileMessage(
         return;
       }
       case "session.create": {
+        const initialMessage = message.initialMessage?.trim();
+        if (message.agent === "pi") {
+          const session = await createPiSession(message.cwd);
+          await relay.sendToMobile(fromMobileId, {
+            type: "session.created",
+            requestId: message.requestId,
+            session
+          });
+          if (initialMessage) {
+            await startPiTurn(relay, {
+              fromMobileId,
+              requestId: message.requestId,
+              threadId: session.id,
+              text: initialMessage
+            });
+          }
+          return;
+        }
+        if (message.agent === "claude") {
+          const session = await createClaudeSession(message.cwd);
+          await relay.sendToMobile(fromMobileId, {
+            type: "session.created",
+            requestId: message.requestId,
+            session
+          });
+          if (initialMessage) {
+            await startClaudeTurn(relay, {
+              fromMobileId,
+              requestId: message.requestId,
+              threadId: session.id,
+              text: initialMessage
+            });
+          }
+          return;
+        }
+
         const model = codexModelOverride();
         const response = (await appServer.request("thread/start", {
           cwd: message.cwd,
@@ -241,7 +298,6 @@ async function handleMobileMessage(
           requestId: message.requestId,
           session
         });
-        const initialMessage = message.initialMessage?.trim();
         if (initialMessage) {
           await handleTurnStart(appServer, relay, turnRuntime, {
             fromMobileId,
@@ -256,6 +312,26 @@ async function handleMobileMessage(
         return;
       }
       case "turn.start": {
+        if (isPiThreadId(message.threadId)) {
+          if (message.attachments?.length) throw new Error("Pi sessions do not support mobile attachments yet.");
+          await startPiTurn(relay, {
+            fromMobileId,
+            requestId: message.requestId,
+            threadId: message.threadId,
+            text: message.text
+          });
+          return;
+        }
+        if (isClaudeThreadId(message.threadId)) {
+          if (message.attachments?.length) throw new Error("Claude sessions do not support mobile attachments yet.");
+          await startClaudeTurn(relay, {
+            fromMobileId,
+            requestId: message.requestId,
+            threadId: message.threadId,
+            text: message.text
+          });
+          return;
+        }
         const model = codexModelOverride();
         await handleTurnStart(appServer, relay, turnRuntime, {
           fromMobileId,
@@ -269,6 +345,22 @@ async function handleMobileMessage(
         return;
       }
       case "turn.interrupt":
+        if (isPiThreadId(message.threadId)) {
+          await interruptPiTurn(relay, {
+            fromMobileId,
+            requestId: message.requestId,
+            threadId: message.threadId
+          });
+          return;
+        }
+        if (isClaudeThreadId(message.threadId)) {
+          await interruptClaudeTurn(relay, {
+            fromMobileId,
+            requestId: message.requestId,
+            threadId: message.threadId
+          });
+          return;
+        }
         await handleTurnInterrupt(appServer, relay, turnRuntime, {
           fromMobileId,
           requestId: message.requestId,

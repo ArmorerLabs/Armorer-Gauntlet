@@ -30,6 +30,7 @@ import {
   parseRelayWireMessage,
   randomId,
   toArrayBuffer,
+  type AgentKind,
   type AppMessage,
   type AttentionEvent,
   type DeviceIdentity,
@@ -268,8 +269,8 @@ class RemoteClient {
     await interrupted;
   }
 
-  async createSession(cwd: string, initialMessage?: string): Promise<SessionSummary> {
-    if (this.mockMode) return this.mockCreateSession(cwd, initialMessage);
+  async createSession(cwd: string, initialMessage?: string, agent: AgentKind = "codex"): Promise<SessionSummary> {
+    if (this.mockMode) return this.mockCreateSession(cwd, initialMessage, agent);
     const requestId = randomId("req");
     const trimmedInitialMessage = initialMessage?.trim() ?? "";
     const created = new Promise<SessionSummary>((resolve, reject) => {
@@ -288,6 +289,7 @@ class RemoteClient {
       type: "session.create",
       requestId,
       cwd: cwd.trim(),
+      agent,
       ...(trimmedInitialMessage ? { initialMessage: trimmedInitialMessage } : {})
     });
     return created;
@@ -764,11 +766,12 @@ class RemoteClient {
     await navigator.serviceWorker.register("/service-worker.js", { type: "module" });
   }
 
-  private async mockCreateSession(cwd: string, initialMessage?: string): Promise<SessionSummary> {
+  private async mockCreateSession(cwd: string, initialMessage?: string, agent: AgentKind = "codex"): Promise<SessionSummary> {
     const trimmedInitialMessage = initialMessage?.trim() ?? "";
     const session = mockSession({
-      id: "mock-new-session",
-      name: "Mobile race fix",
+      id: mockSessionId(agent, "mock-new-session"),
+      agent,
+      name: agent === "pi" ? "Pi workspace check" : agent === "claude" ? "Claude implementation check" : "Mobile race fix",
       preview: trimmedInitialMessage,
       cwd: cwd.trim() || "/Users/example/Projects/armorer-gauntlet",
       status: trimmedInitialMessage ? "starting" : "idle",
@@ -1067,6 +1070,30 @@ function createMockState(): RemoteUiState {
     status: activeThread ? "active" : "idle",
     updatedAt: Date.now() / 1000
   });
+  const piSession = mockSession({
+    id: "pi:mock-pi-session",
+    agent: "pi",
+    name: "Pi release triage",
+    preview: "Checked gateway logs and UI reachability.",
+    cwd: "/Users/example/Projects/armorer",
+    status: "idle",
+    modelProvider: "openrouter",
+    source: "pi",
+    resumeCommand: "pi --session mock-pi-session",
+    updatedAt: Date.now() / 1000 - 480
+  });
+  const claudeSession = mockSession({
+    id: "claude:mock-claude-session",
+    agent: "claude",
+    name: "Claude Code mobile bridge",
+    preview: "I can handle this from Claude Code.",
+    cwd: "/Users/example/Projects/armorer-gauntlet",
+    status: "idle",
+    modelProvider: "anthropic",
+    source: "claude",
+    resumeCommand: "claude --resume mock-claude-session",
+    updatedAt: Date.now() / 1000 - 720
+  });
   const approval = url.searchParams.get("approval") === "1";
   const readyAttention = url.searchParams.get("ready") === "1";
   const longThread = url.searchParams.get("long") === "1";
@@ -1130,9 +1157,43 @@ function createMockState(): RemoteUiState {
       connectedAt: new Date().toISOString(),
       pairedDeviceCount: 1
     },
-    sessions: [session],
+    sessions: [session, piSession, claudeSession],
     attentions,
     threads: {
+      [piSession.id]: {
+        ...piSession,
+        turns: [
+          {
+            id: "mock-pi-turn-1",
+            status: "completed",
+            items: [
+              { id: "mock-pi-user-1", type: "userMessage", text: "Can you find the Armorer UI link?" },
+              {
+                id: "mock-pi-agent-1",
+                type: "agentMessage",
+                text: "The Pi session is visible in Gauntlet. The UI route is reachable from the server port, and this transcript is coming from the Pi lane."
+              }
+            ]
+          }
+        ]
+      },
+      [claudeSession.id]: {
+        ...claudeSession,
+        turns: [
+          {
+            id: "mock-claude-turn-1",
+            status: "completed",
+            items: [
+              { id: "mock-claude-user-1", type: "userMessage", text: "Can you work on this through Claude Code?" },
+              {
+                id: "mock-claude-agent-1",
+                type: "agentMessage",
+                text: "Claude Code is wired into the same mobile session surface, with its own resumable session id."
+              }
+            ]
+          }
+        ]
+      },
       [session.id]: {
         ...session,
         turns: [
@@ -1162,16 +1223,29 @@ function createMockState(): RemoteUiState {
 
 function mockSession(input: Partial<SessionSummary> & Pick<SessionSummary, "id" | "name" | "cwd">): SessionSummary {
   const updatedAt = input.updatedAt ?? Date.now() / 1000;
+  const agent = input.agent ?? "codex";
   return {
     preview: "",
     createdAt: updatedAt,
     status: "idle",
-    modelProvider: "openai",
-    source: "mock",
-    resumeCommand: `codex resume ${input.id}`,
+    agent: "codex",
+    modelProvider: agent === "pi" ? "openrouter" : agent === "claude" ? "anthropic" : "openai",
+    source: agent === "pi" ? "pi" : agent === "claude" ? "claude" : "mock",
+    resumeCommand:
+      agent === "pi"
+        ? `pi --session ${input.id.replace(/^pi:/, "")}`
+        : agent === "claude"
+          ? `claude --resume ${input.id.replace(/^claude:/, "")}`
+          : `codex resume ${input.id}`,
     ...input,
     updatedAt
   };
+}
+
+function mockSessionId(agent: AgentKind, id: string): string {
+  if (agent === "pi") return `pi:${id}`;
+  if (agent === "claude") return `claude:${id}`;
+  return id;
 }
 
 function mockThread(threadId: string) {

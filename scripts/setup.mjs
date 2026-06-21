@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { EOL } from "node:os";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { EOL, homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 const envPath = new URL("../.env", import.meta.url);
 const examplePath = new URL("../.env.example", import.meta.url);
@@ -37,6 +38,11 @@ async function main() {
   } else {
     warn("codex was not found. Install and log in to Codex before running make daemon.");
   }
+  if (hasCommand("claude")) {
+    run("claude", ["--version"], "Checking Claude Code CLI");
+  } else {
+    warn("claude was not found. Claude Code sessions will be unavailable until Claude Code is installed and logged in.");
+  }
 
   run("npm", ["install"], "Installing npm dependencies");
   run("npm", ["run", "build:libs"], "Building workspace libraries");
@@ -47,6 +53,11 @@ async function main() {
     RELAY_PORT: "8787",
     FRONT_DOOR_PORT: "8080",
     RELAY_URL: "ws://127.0.0.1:8787",
+    PI_NODE_BIN_DIR: detectPiNodeBinDir() ?? "",
+    PI_CLI_ARGS: "",
+    CLAUDE_CODE_CLI_PATH: "",
+    CLAUDE_CODE_CLI_ARGS: "",
+    CLAUDE_GAUNTLET_SESSION_DIR: "",
     VAPID_SUBJECT: "mailto:you@example.com",
     ...env
   };
@@ -82,6 +93,35 @@ function hasCommand(command) {
 function dockerInfoWorks() {
   const result = spawnSync("docker", ["info"], { stdio: "ignore" });
   return result.status === 0;
+}
+
+function detectPiNodeBinDir() {
+  const candidates = [
+    process.execPath,
+    ...nodeExecutablesIn(join(homedir(), ".nvm", "versions", "node")),
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node"
+  ];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate) || !existsSync(candidate)) continue;
+    seen.add(candidate);
+    const result = spawnSync(candidate, ["-e", "process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)"], {
+      stdio: "ignore"
+    });
+    if (result.status === 0) return dirname(candidate);
+  }
+  return undefined;
+}
+
+function nodeExecutablesIn(root) {
+  try {
+    return readdirSync(root)
+      .map((version) => join(root, version, "bin", "node"))
+      .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+  } catch {
+    return [];
+  }
 }
 
 function run(command, args, label) {
@@ -135,6 +175,11 @@ function writeEnvFile(values) {
     "RELAY_PORT",
     "FRONT_DOOR_PORT",
     "RELAY_URL",
+    "PI_NODE_BIN_DIR",
+    "PI_CLI_ARGS",
+    "CLAUDE_CODE_CLI_PATH",
+    "CLAUDE_CODE_CLI_ARGS",
+    "CLAUDE_GAUNTLET_SESSION_DIR",
     "VAPID_SUBJECT",
     "VAPID_PUBLIC_KEY",
     "VAPID_PRIVATE_KEY",
