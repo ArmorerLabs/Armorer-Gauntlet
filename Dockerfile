@@ -1,4 +1,4 @@
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -20,14 +20,14 @@ ARG PUBLIC_VAPID_PUBLIC_KEY=
 ENV PUBLIC_VAPID_PUBLIC_KEY=$PUBLIC_VAPID_PUBLIC_KEY
 RUN npm run build -w @armorer/gauntlet-shared -w @armorer/gauntlet-pwa
 
-FROM node:22-alpine AS relay
+FROM node:26-alpine AS relay
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=relay-build /app /app
 EXPOSE 8787
 CMD ["node", "apps/relay/dist/index.js", "--host", "0.0.0.0", "--port", "8787"]
 
-FROM node:22-alpine AS pwa
+FROM node:26-alpine AS pwa
 WORKDIR /app
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
