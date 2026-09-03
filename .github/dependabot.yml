@@ -12,6 +12,9 @@ updates:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Root npm workspace: package.json and package-lock.json cover apps/* and
   # packages/*. Monthly, with minor and patch batched so version updates stay
