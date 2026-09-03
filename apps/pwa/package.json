@@ -13,7 +13,7 @@
   "dependencies": {
     "@armorer/gauntlet-shared": "0.3.0",
     "@sveltejs/adapter-node": "^5.2.13",
-    "@sveltejs/kit": "^2.27.0",
+    "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "jsqr": "^1.4.0",
     "lucide-svelte": "^1.0.1",

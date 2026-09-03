@@ -37,7 +37,7 @@
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@sveltejs/adapter-node": "^5.2.13",
-    "@sveltejs/kit": "^2.27.0",
+    "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "@types/node": "^22.15.3",
     "@types/qrcode-terminal": "^0.12.2",
