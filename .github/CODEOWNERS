@@ -1,0 +1,4 @@
+# Default ownership covers executable, dependency, workflow, deployment,
+# identity, credential, and ownership-policy paths.
+# A pull request author cannot satisfy their own owner approval.
+* @begimher @cristianleoo
